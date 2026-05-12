@@ -1,0 +1,16 @@
+{
+  "name": "lc79-ai-predictor",
+  "version": "1.0.0",
+  "description": "LC79 AI Predictor Server",
+  "main": "index.js",
+  "author": "HuyDaiXu AI",
+  "license": "MIT",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "express": "^4.19.2"
+  }
+}
