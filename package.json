@@ -1,20 +1,16 @@
 {
-  "name": "tx-vip-predictor",
-  "version": "3.0.0",
-  "description": "Siêu dự đoán Tài Xỉu với hơn 100 thuật toán không random, dashboard trực quan, tự động ping.",
-  "main": "server.js",
+  "name": "tele68-api",
+  "version": "1.0.0",
+  "description": "Tele68 Login & Bet API",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node index.js"
   },
-  "keywords": ["taixiu", "prediction", "api", "dashboard", "ping"],
-  "author": "HuyDaiXuVN",
+  "author": "HuyDaiXu",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.7.2",
-    "express": "^4.19.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+    "axios": "^1.8.4",
+    "express": "^4.21.2",
+    "ws": "^8.18.1"
   }
 }
