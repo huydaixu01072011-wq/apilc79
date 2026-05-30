@@ -9,10 +9,12 @@ const API_URL_HU = 'https://wtx.tele68.com/v1/tx/sessions';
 const API_URL_MD5 = 'https://wtxmd52.tele68.com/v1/txmd5/sessions';
 const ADMIN_NAME = 'HuyDaiXuVN';
 
-// ==================== IN-MEMORY PREDICTION STORE ====================
+// ==================== IN-MEMORY STORES ====================
 const predictions = [];
 let predictionIdCounter = 0;
 const MAX_PREDICTIONS = 500;
+let pingCount = 0;
+const startTime = Date.now();
 
 // ==================== UTILS ====================
 function formatTime(date) {
@@ -23,7 +25,8 @@ function formatTime(date) {
 }
 
 function transformData(list) {
-  const sorted = list.sort((a, b) => b.id - a.id);
+  if (!list || !Array.isArray(list)) return [];
+  const sorted = [...list].sort((a, b) => b.id - a.id);
   return sorted.map(item => ({
     phien: item.id,
     xuc_xac_1: item.dices[0],
@@ -36,27 +39,31 @@ function transformData(list) {
   }));
 }
 
-async function fetchHistory(apiUrl) {
-  try {
-    const response = await axios.get(apiUrl, { timeout: 10000 });
-    if (!response.data || !Array.isArray(response.data.list)) {
-      throw new Error('Invalid API response structure');
+async function fetchWithRetry(apiUrl, retries = 2, delay = 1000) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const response = await axios.get(apiUrl, { timeout: 10000 });
+      if (response.data && Array.isArray(response.data.list)) return response.data.list;
+      throw new Error('Invalid structure');
+    } catch (err) {
+      console.error(`Attempt ${i + 1} failed for ${apiUrl}: ${err.message}`);
+      if (i < retries) await new Promise(r => setTimeout(r, delay));
     }
-    return transformData(response.data.list);
-  } catch (error) {
-    console.error(`Fetch error from ${apiUrl}:`, error.message);
-    throw error;
   }
+  throw new Error(`Failed after ${retries + 1} attempts`);
+}
+
+async function fetchHistory(apiUrl) {
+  const raw = await fetchWithRetry(apiUrl);
+  return transformData(raw);
 }
 
 // ==================== CHECK REAL-TIME CORRECTNESS ====================
 async function checkPendingPredictions() {
   const pending = predictions.filter(p => p.status === 'pending');
   if (pending.length === 0) return;
-
   const byGame = { lc79: [], md5: [] };
   pending.forEach(p => byGame[p.game]?.push(p));
-
   for (const [game, preds] of Object.entries(byGame)) {
     if (preds.length === 0) continue;
     try {
@@ -64,30 +71,27 @@ async function checkPendingPredictions() {
       const history = await fetchHistory(apiUrl);
       const mapKetQua = {};
       history.forEach(item => { mapKetQua[item.phien] = item.ket_qua; });
-
       for (const pred of preds) {
         if (mapKetQua[pred.predictedPhien] !== undefined) {
           pred.actualKetQua = mapKetQua[pred.predictedPhien];
           pred.status = (pred.prediction === pred.actualKetQua) ? 'correct' : 'incorrect';
           pred.checkedAt = new Date().toISOString();
-          console.log(`[CHECK] Phiên ${pred.predictedPhien} (${game}): dự đoán ${pred.prediction}, thực tế ${pred.actualKetQua} -> ${pred.status}`);
         }
       }
     } catch (err) {
       console.error(`Check failed for ${game}:`, err.message);
     }
   }
-
   if (predictions.length > MAX_PREDICTIONS) {
     const sorted = [...predictions].sort((a, b) => b.timestamp - a.timestamp);
     predictions.length = 0;
     predictions.push(...sorted.slice(0, MAX_PREDICTIONS));
   }
 }
-
 setInterval(checkPendingPredictions, 15000);
 
-// ==================== THUẬT TOÁN (ĐẦY ĐỦ, KHÔNG RANDOM) ====================
+// ==================== TẤT CẢ THUẬT TOÁN (HƠN 100) ====================
+// --- Nhóm cơ bản ---
 function algorithmInvertLast(historyAsc) {
   const latest = historyAsc[historyAsc.length - 1];
   const prediction = latest.ket_qua === 'tai' ? 'xiu' : 'tai';
@@ -103,7 +107,7 @@ function algorithmInvertLast(historyAsc) {
 
 function algorithmFollowStreak(historyAsc) {
   const len = historyAsc.length;
-  if (len < 2) return { prediction: historyAsc[len - 1].ket_qua, confidence: 50, algorithm: 'Theo Cầu (không đủ dữ liệu)' };
+  if (len < 2) return { prediction: historyAsc[len - 1].ket_qua, confidence: 50, algorithm: 'Theo Cầu (thiếu dữ liệu)' };
   const lastTwoSame = historyAsc[len - 1].ket_qua === historyAsc[len - 2].ket_qua;
   const prediction = lastTwoSame ? historyAsc[len - 1].ket_qua : (historyAsc[len - 1].ket_qua === 'tai' ? 'xiu' : 'tai');
   let correct = 0, total = 0;
@@ -312,7 +316,6 @@ function algorithmCandlestickPattern(historyAsc) {
   return { prediction, confidence: 55, algorithm: 'Mẫu Nến' };
 }
 
-// THUẬT TOÁN MỚI SIÊU VIP (không tự học, chỉ phân tích thống kê)
 function algorithmEMACross(historyAsc, fastPeriod = 5, slowPeriod = 10) {
   const len = historyAsc.length;
   if (len < slowPeriod + 1) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `EMA Cross (${fastPeriod}/${slowPeriod})` };
@@ -429,12 +432,11 @@ function algorithmDiceComponentTrend(historyAsc) {
 
 function algorithmFibonacciSequence(historyAsc) {
   const seq = historyAsc.map(i => i.ket_qua);
-  let maxStreak = 1, current = 1;
+  let current = 1;
   for (let i=1; i<seq.length; i++) {
     if (seq[i] === seq[i-1]) current++;
-    else { if (current>maxStreak) maxStreak = current; current = 1; }
+    else current = 1;
   }
-  if (current>maxStreak) maxStreak = current;
   const last = historyAsc[historyAsc.length-1];
   const fibs = [1,2,3,5,8];
   if (fibs.includes(current)) {
@@ -464,92 +466,578 @@ function algorithmRSIResult(historyAsc, period=14) {
   return { prediction, confidence: Math.min(80, Math.abs(rsi-50)+40), algorithm: `RSI KQ (${period})` };
 }
 
-// Tạo danh sách TẤT CẢ THUẬT TOÁN
+// --- Thuật toán mới nâng cao ---
+function algorithmMomentum(historyAsc, period = 5) {
+  const len = historyAsc.length;
+  if (len < period + 1) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `Momentum (${period})` };
+  const momentum = historyAsc[len-1].tong - historyAsc[len-period-1].tong;
+  return { prediction: momentum > 0 ? 'tai' : 'xiu', confidence: Math.min(70, Math.abs(momentum)*5), algorithm: `Momentum (${period})` };
+}
+
+function algorithmROC(historyAsc, period = 5) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `ROC (${period})` };
+  const prev = historyAsc[len-period].tong;
+  if (prev === 0) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `ROC (${period})` };
+  const roc = ((historyAsc[len-1].tong - prev) / prev) * 100;
+  return { prediction: roc > 0 ? 'tai' : 'xiu', confidence: Math.min(65, Math.abs(roc)), algorithm: `ROC (${period})` };
+}
+
+function algorithmTSI(historyAsc, r = 5, s = 8) {
+  const len = historyAsc.length;
+  if (len < r + s) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `TSI (${r},${s})` };
+  const changes = [];
+  for (let i = 1; i < len; i++) changes.push(historyAsc[i].tong - historyAsc[i-1].tong);
+  const ema = (arr, period) => {
+    const k = 2/(period+1);
+    let result = [arr[0]];
+    for (let i=1; i<arr.length; i++) result.push(arr[i]*k + result[i-1]*(1-k));
+    return result;
+  };
+  const ema1 = ema(changes, r);
+  const ema2 = ema(ema1, s);
+  const lastTSI = ema2[ema2.length-1];
+  return { prediction: lastTSI > 0 ? 'tai' : 'xiu', confidence: Math.min(70, Math.abs(lastTSI)*10), algorithm: `TSI (${r},${s})` };
+}
+
+function algorithmKeltner(historyAsc, period=10, multiplier=1.5) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `Keltner (${period})` };
+  const prices = historyAsc.slice(-period).map(i => i.tong);
+  const ma = prices.reduce((a,b)=>a+b,0)/period;
+  const tr = [];
+  for (let i=1; i<prices.length; i++) tr.push(Math.abs(prices[i]-prices[i-1]));
+  const atr = tr.reduce((a,b)=>a+b,0)/tr.length;
+  const upper = ma + multiplier * atr;
+  const lower = ma - multiplier * atr;
+  const last = prices[prices.length-1];
+  if (last > upper) return { prediction: 'xiu', confidence: 60, algorithm: `Keltner (${period})` };
+  if (last < lower) return { prediction: 'tai', confidence: 60, algorithm: `Keltner (${period})` };
+  return { prediction: last > ma ? 'tai' : 'xiu', confidence: 50, algorithm: `Keltner (${period})` };
+}
+
+function algorithmATR(historyAsc, period=7) {
+  const len = historyAsc.length;
+  if (len < period+1) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `ATR (${period})` };
+  const tr = [];
+  for (let i=1; i<len; i++) tr.push(Math.abs(historyAsc[i].tong - historyAsc[i-1].tong));
+  const atr = tr.slice(-period).reduce((a,b)=>a+b,0)/period;
+  const lastChange = tr[tr.length-1];
+  if (lastChange > atr * 1.5) return { prediction: 'xiu', confidence: 60, algorithm: `ATR (${period})` };
+  if (lastChange < atr * 0.5) return { prediction: 'tai', confidence: 55, algorithm: `ATR (${period})` };
+  return { prediction: historyAsc[len-1].ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 45, algorithm: `ATR (${period})` };
+}
+
+function algorithmADX(historyAsc, period=7) {
+  const len = historyAsc.length;
+  if (len < period*2) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `ADX (${period})` };
+  const dmPlus = [], dmMinus = [], trArr = [];
+  for (let i=1; i<len; i++) {
+    const up = historyAsc[i].tong - historyAsc[i-1].tong;
+    const down = historyAsc[i-1].tong - historyAsc[i].tong;
+    dmPlus.push(up > down && up > 0 ? up : 0);
+    dmMinus.push(down > up && down > 0 ? down : 0);
+    trArr.push(Math.abs(historyAsc[i].tong - historyAsc[i-1].tong));
+  }
+  const sma = (arr) => arr.slice(-period).reduce((a,b)=>a+b,0)/period;
+  const atr = sma(trArr);
+  if (atr === 0) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `ADX (${period})` };
+  const diPlus = (sma(dmPlus) / atr) * 100;
+  const diMinus = (sma(dmMinus) / atr) * 100;
+  if (diPlus > diMinus) return { prediction: 'tai', confidence: 55, algorithm: `ADX (${period})` };
+  return { prediction: 'xiu', confidence: 55, algorithm: `ADX (${period})` };
+}
+
+function algorithmParabolicSAR(historyAsc, acceleration=0.02, maxAccel=0.2) {
+  const len = historyAsc.length;
+  if (len < 5) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Parabolic SAR' };
+  let trend = historyAsc[0].tong < historyAsc[1].tong ? 'tai' : 'xiu';
+  let sar = trend === 'tai' ? Math.min(...historyAsc.slice(0,2).map(i=>i.tong)) : Math.max(...historyAsc.slice(0,2).map(i=>i.tong));
+  let ep = trend === 'tai' ? Math.max(...historyAsc.slice(0,2).map(i=>i.tong)) : Math.min(...historyAsc.slice(0,2).map(i=>i.tong));
+  let af = acceleration;
+  for (let i=2; i<len; i++) {
+    const price = historyAsc[i].tong;
+    sar = sar + af * (ep - sar);
+    if ((trend === 'tai' && price < sar) || (trend === 'xiu' && price > sar)) {
+      trend = trend === 'tai' ? 'xiu' : 'tai';
+      sar = ep;
+      af = acceleration;
+      ep = price;
+    } else {
+      if (trend === 'tai' && price > ep) { ep = price; af = Math.min(af+acceleration, maxAccel); }
+      else if (trend === 'xiu' && price < ep) { ep = price; af = Math.min(af+acceleration, maxAccel); }
+    }
+  }
+  return { prediction: trend, confidence: 55, algorithm: 'Parabolic SAR' };
+}
+
+function algorithmEntropy(historyAsc, window=20) {
+  const seq = historyAsc.slice(-window).map(i => i.ket_qua).join('');
+  const freq = {};
+  for (let c of seq) freq[c] = (freq[c] || 0) + 1;
+  let entropy = 0;
+  for (let k in freq) {
+    const p = freq[k] / seq.length;
+    entropy -= p * Math.log2(p);
+  }
+  const maxEntropy = Math.log2(2);
+  const normalized = entropy / maxEntropy;
+  if (normalized > 0.8) return { prediction: historyAsc[historyAsc.length-1].ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 60, algorithm: 'Entropy cao' };
+  return { prediction: historyAsc[historyAsc.length-1].ket_qua, confidence: 50, algorithm: 'Entropy thấp' };
+}
+
+function algorithmPoisson(historyAsc, period=15) {
+  const slice = historyAsc.slice(-period);
+  if (slice.length < period) return { prediction: historyAsc[historyAsc.length-1].ket_qua, confidence: 40, algorithm: `Poisson (${period})` };
+  const mean = slice.reduce((s,i)=>s+i.tong,0)/slice.length;
+  function poissonCDF(k, lambda) {
+    let sum = 0, term = Math.exp(-lambda);
+    for (let i=0; i<=k; i++) {
+      sum += term;
+      term *= lambda/(i+1);
+    }
+    return sum;
+  }
+  const probTai = 1 - poissonCDF(10, mean);
+  const prediction = probTai > 0.5 ? 'tai' : 'xiu';
+  return { prediction, confidence: Math.min(70, Math.abs(probTai-0.5)*200), algorithm: `Poisson (${period})` };
+}
+
+function algorithmLinearRegression(historyAsc, period=12) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `Linear Reg (${period})` };
+  const x = [], y = [];
+  for (let i=len-period; i<len; i++) { x.push(i - (len-period)); y.push(historyAsc[i].tong); }
+  const n = x.length;
+  const sumX = x.reduce((a,b)=>a+b,0), sumY = y.reduce((a,b)=>a+b,0);
+  const sumXY = x.reduce((s,xi,i)=>s+xi*y[i],0), sumX2 = x.reduce((s,xi)=>s+xi*xi,0);
+  const slope = (n*sumXY - sumX*sumY) / (n*sumX2 - sumX*sumX);
+  return { prediction: slope > 0 ? 'tai' : 'xiu', confidence: Math.min(65, Math.abs(slope)*10), algorithm: `Linear Reg (${period})` };
+}
+
+function algorithmAR1(historyAsc, period=10) {
+  const len = historyAsc.length;
+  if (len < period+2) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `AR(1) (${period})` };
+  const y = historyAsc.slice(-period-1).map(i => i.tong);
+  let sumYt=0, sumYt1=0, sumYtSq=0, sumYt1Sq=0, sumYtYt1=0;
+  for (let t=1; t<y.length; t++) {
+    sumYt += y[t]; sumYt1 += y[t-1];
+    sumYtSq += y[t]*y[t]; sumYt1Sq += y[t-1]*y[t-1];
+    sumYtYt1 += y[t]*y[t-1];
+  }
+  const n = y.length-1;
+  const phi = (n*sumYtYt1 - sumYt*sumYt1) / (n*sumYt1Sq - sumYt1*sumYt1);
+  const forecast = phi * y[y.length-1] + (1-phi)*(sumYt/n);
+  return { prediction: forecast > 10.5 ? 'tai' : 'xiu', confidence: 55, algorithm: `AR(1) (${period})` };
+}
+
+function algorithmFractal(historyAsc, kmax=5) {
+  const len = historyAsc.length;
+  if (len < kmax*3) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Fractal' };
+  const x = historyAsc.map(i => i.tong);
+  const L = (k) => {
+    let sum = 0;
+    for (let m=0; m<k; m++) {
+      let lenSeq = 0, cnt = 0;
+      for (let i=m; i+k < x.length; i+=k) {
+        lenSeq += Math.abs(x[i+k] - x[i]);
+        cnt++;
+      }
+      if (cnt > 0) sum += (lenSeq / cnt) * ((x.length-1)/(cnt*k));
+    }
+    return sum/k;
+  };
+  const lengths = [];
+  for (let k=1; k<=kmax; k++) lengths.push(Math.log(L(k)));
+  const logK = [1,2,3,4,5].map(Math.log);
+  const n = lengths.length;
+  const sumX=logK.reduce((a,b)=>a+b,0), sumY=lengths.reduce((a,b)=>a+b,0);
+  const slope = (n*logK.reduce((s,x,i)=>s+x*lengths[i],0) - sumX*sumY) / (n*logK.reduce((s,x)=>s+x*x,0)-sumX*sumX);
+  if (slope < 1.5) return { prediction: 'tai', confidence: 60, algorithm: 'Fractal trend' };
+  return { prediction: 'xiu', confidence: 50, algorithm: 'Fractal range' };
+}
+
+function algorithmDiceFrequency1(historyAsc, period=20) {
+  const slice = historyAsc.slice(-period);
+  const freq = new Array(7).fill(0);
+  slice.forEach(i => freq[i.xuc_xac_1]++);
+  const maxIdx = freq.indexOf(Math.max(...freq.slice(1)));
+  return { prediction: maxIdx >= 4 ? 'tai' : 'xiu', confidence: 55, algorithm: 'Tần suất Xúc xắc 1' };
+}
+
+function algorithmAvg3Gap(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 4) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Avg3 Gap' };
+  const avg3 = (historyAsc[len-1].tong + historyAsc[len-2].tong + historyAsc[len-3].tong)/3;
+  const prev = historyAsc[len-4].tong;
+  return { prediction: avg3 > prev ? 'tai' : 'xiu', confidence: Math.min(65, Math.abs(avg3-prev)*5), algorithm: 'Avg3 Gap' };
+}
+
+function algorithmPivot(historyAsc, period=5) {
+  const slice = historyAsc.slice(-period);
+  const high = Math.max(...slice.map(i=>i.tong));
+  const low = Math.min(...slice.map(i=>i.tong));
+  const pivot = (high+low+slice[slice.length-1].tong)/3;
+  const last = slice[slice.length-1].tong;
+  if (last > pivot*1.05) return { prediction: 'tai', confidence: 55, algorithm: 'Pivot break up' };
+  if (last < pivot*0.95) return { prediction: 'xiu', confidence: 55, algorithm: 'Pivot break down' };
+  return { prediction: last > pivot ? 'tai' : 'xiu', confidence: 45, algorithm: 'Pivot range' };
+}
+
+function algorithmElliott(historyAsc) {
+  const seq = historyAsc.map(i => i.ket_qua);
+  let waves = 0, current = seq[0], cnt = 0;
+  for (let k of seq) {
+    if (k === current) cnt++;
+    else { if (cnt>=3) waves++; current = k; cnt=1; }
+  }
+  if (waves >= 5) return { prediction: current === 'tai' ? 'xiu' : 'tai', confidence: 60, algorithm: 'Elliott Wave' };
+  return { prediction: current, confidence: 50, algorithm: 'Elliott' };
+}
+
+function algorithmHullMA(historyAsc, period=10) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `Hull MA (${period})` };
+  const prices = historyAsc.map(i => i.tong);
+  const wma = (src, p) => {
+    let sum = 0, weightSum = 0;
+    for (let i=0; i<src.length; i++) {
+      const w = i+1;
+      sum += src[i]*w;
+      weightSum += w;
+    }
+    return sum/weightSum;
+  };
+  const half = Math.floor(period/2);
+  const sqrtP = Math.floor(Math.sqrt(period));
+  const recentPrices = prices.slice(-period);
+  const wma1 = wma(recentPrices.slice(-half), half);
+  const wma2 = wma(recentPrices, period);
+  const hull = wma(recentPrices.slice(-sqrtP).map((_, i) => 2*wma1 - wma2), sqrtP);
+  return { prediction: hull > prices[prices.length-1] ? 'tai' : 'xiu', confidence: 55, algorithm: `Hull MA (${period})` };
+}
+
+function algorithmStdDice2(historyAsc) {
+  const slice = historyAsc.slice(-12);
+  const vals = slice.map(i => i.xuc_xac_2);
+  const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
+  const std = Math.sqrt(vals.reduce((s,v)=>s+Math.pow(v-mean,2),0)/vals.length);
+  if (std > 1.8) return { prediction: 'tai', confidence: 55, algorithm: 'Std Dice 2 high' };
+  return { prediction: 'xiu', confidence: 55, algorithm: 'Std Dice 2 low' };
+}
+
+function algorithmCorrDice13(historyAsc) {
+  const slice = historyAsc.slice(-15);
+  const x1 = slice.map(i=>i.xuc_xac_1), x3 = slice.map(i=>i.xuc_xac_3);
+  const sumX1=x1.reduce((a,b)=>a+b,0), sumX3=x3.reduce((a,b)=>a+b,0);
+  const n = x1.length;
+  const sumXY = x1.reduce((s,v,i)=>s+v*x3[i],0);
+  const r = (n*sumXY - sumX1*sumX3) / (Math.sqrt(n*x1.reduce((s,v)=>s+v*v,0)-sumX1*sumX1) * Math.sqrt(n*x3.reduce((s,v)=>s+v*v,0)-sumX3*sumX3));
+  if (r > 0.3) return { prediction: 'tai', confidence: 55, algorithm: 'Corr Dice 1-3 pos' };
+  if (r < -0.3) return { prediction: 'xiu', confidence: 55, algorithm: 'Corr Dice 1-3 neg' };
+  return { prediction: historyAsc[historyAsc.length-1].ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 45, algorithm: 'Corr Dice 1-3' };
+}
+
+function algorithmEvenOddDice3(historyAsc) {
+  const last = historyAsc[historyAsc.length-1];
+  const cntEven = [last.xuc_xac_1, last.xuc_xac_2, last.xuc_xac_3].filter(d=>d%2===0).length;
+  if (cntEven === 3) return { prediction: 'xiu', confidence: 60, algorithm: 'All Even' };
+  if (cntEven === 0) return { prediction: 'tai', confidence: 60, algorithm: 'All Odd' };
+  return { prediction: cntEven >= 2 ? 'tai' : 'xiu', confidence: 50, algorithm: 'EvenOdd Mix' };
+}
+
+function algorithmCycle2(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 6) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Cycle 2' };
+  const pattern = historyAsc[len-2].ket_qua + historyAsc[len-1].ket_qua;
+  let count = 0, lastIdx = -1;
+  for (let i=0; i<len-1; i++) {
+    if (historyAsc[i].ket_qua + historyAsc[i+1].ket_qua === pattern) {
+      count++;
+      lastIdx = i;
+    }
+  }
+  if (count >= 3 && lastIdx+2 < len) {
+    const next = historyAsc[lastIdx+2].ket_qua;
+    return { prediction: next, confidence: 65, algorithm: 'Cycle 2 lặp' };
+  }
+  return { prediction: pattern[1] === 't' ? 'xiu' : 'tai', confidence: 50, algorithm: 'Cycle 2' };
+}
+
+function algorithmRange(historyAsc, period=8) {
+  const slice = historyAsc.slice(-period);
+  const range = Math.max(...slice.map(i=>i.tong)) - Math.min(...slice.map(i=>i.tong));
+  if (range > 10) return { prediction: 'xiu', confidence: 55, algorithm: 'Range rộng' };
+  return { prediction: 'tai', confidence: 55, algorithm: 'Range hẹp' };
+}
+
+function algorithmHarami(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 2) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Harami' };
+  const prev = historyAsc[len-2], last = historyAsc[len-1];
+  if (prev.ket_qua === 'tai' && prev.tong > 14 && last.ket_qua === 'xiu' && last.tong < 7) return { prediction: 'xiu', confidence: 65, algorithm: 'Bearish Harami' };
+  if (prev.ket_qua === 'xiu' && prev.tong < 6 && last.ket_qua === 'tai' && last.tong > 14) return { prediction: 'tai', confidence: 65, algorithm: 'Bullish Harami' };
+  return { prediction: last.ket_qua, confidence: 50, algorithm: 'Harami' };
+}
+
+function algorithmTwoSum(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 3) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Two Sum' };
+  const sumLast = historyAsc[len-1].tong + historyAsc[len-2].tong;
+  if (sumLast > 22) return { prediction: 'xiu', confidence: 60, algorithm: 'Two Sum high' };
+  if (sumLast < 9) return { prediction: 'tai', confidence: 60, algorithm: 'Two Sum low' };
+  return { prediction: sumLast > 14 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Two Sum' };
+}
+
+function algorithmIchimoku(historyAsc, tenkan=9, kijun=26) {
+  const len = historyAsc.length;
+  if (len < kijun) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Ichimoku' };
+  const highT = historyAsc.slice(-tenkan).reduce((a,b)=>Math.max(a,b.tong),0);
+  const lowT = historyAsc.slice(-tenkan).reduce((a,b)=>Math.min(a,b.tong),Infinity);
+  const tenkanSen = (highT+lowT)/2;
+  const highK = historyAsc.slice(-kijun).reduce((a,b)=>Math.max(a,b.tong),0);
+  const lowK = historyAsc.slice(-kijun).reduce((a,b)=>Math.min(a,b.tong),Infinity);
+  const kijunSen = (highK+lowK)/2;
+  const last = historyAsc[len-1].tong;
+  if (last > Math.max(tenkanSen, kijunSen)) return { prediction: 'tai', confidence: 55, algorithm: 'Ichimoku Cloud' };
+  if (last < Math.min(tenkanSen, kijunSen)) return { prediction: 'xiu', confidence: 55, algorithm: 'Ichimoku Cloud' };
+  return { prediction: last > (tenkanSen+kijunSen)/2 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Ichimoku' };
+}
+
+function algorithmTenEleven(historyAsc) {
+  const last = historyAsc[historyAsc.length-1];
+  if (last.tong === 10 || last.tong === 11) {
+    return { prediction: historyAsc.length > 1 ? historyAsc[historyAsc.length-2].ket_qua : 'tai', confidence: 60, algorithm: '10/11 đặc biệt' };
+  }
+  return { prediction: last.ket_qua, confidence: 50, algorithm: '10/11' };
+}
+
+function algorithmAroon(historyAsc, period=14) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `Aroon (${period})` };
+  const slice = historyAsc.slice(-period);
+  const highIdx = slice.reduce((iMax, x, i, arr) => x.tong > arr[iMax].tong ? i : iMax, 0);
+  const lowIdx = slice.reduce((iMin, x, i, arr) => x.tong < arr[iMin].tong ? i : iMin, 0);
+  const aroonUp = ((period-1 - highIdx) / (period-1)) * 100;
+  const aroonDown = ((period-1 - lowIdx) / (period-1)) * 100;
+  if (aroonUp > 70 && aroonDown < 30) return { prediction: 'tai', confidence: 55, algorithm: 'Aroon Up' };
+  if (aroonDown > 70 && aroonUp < 30) return { prediction: 'xiu', confidence: 55, algorithm: 'Aroon Down' };
+  return { prediction: historyAsc[len-1].ket_qua, confidence: 45, algorithm: 'Aroon' };
+}
+
+function algorithmDeviation3(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 4) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Deviation 3' };
+  const avg3 = (historyAsc[len-2].tong + historyAsc[len-3].tong + historyAsc[len-4].tong)/3;
+  const dev = historyAsc[len-1].tong - avg3;
+  if (dev > 3) return { prediction: 'xiu', confidence: 60, algorithm: 'Deviation > 3' };
+  if (dev < -3) return { prediction: 'tai', confidence: 60, algorithm: 'Deviation < -3' };
+  return { prediction: dev > 0 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Deviation 3' };
+}
+
+function algorithmTriple(historyAsc) {
+  const last = historyAsc[historyAsc.length-1];
+  if (last.xuc_xac_1 === last.xuc_xac_2 && last.xuc_xac_2 === last.xuc_xac_3) {
+    return { prediction: last.ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 70, algorithm: 'Triple (Bão)' };
+  }
+  return { prediction: last.ket_qua, confidence: 50, algorithm: 'Triple' };
+}
+
+function algorithmDice1Change(historyAsc) {
+  const len = historyAsc.length;
+  if (len < 3) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: 'Dice1 Change' };
+  const diff = historyAsc[len-1].xuc_xac_1 - historyAsc[len-2].xuc_xac_1;
+  if (diff > 2) return { prediction: 'tai', confidence: 60, algorithm: 'Dice1 tăng mạnh' };
+  if (diff < -2) return { prediction: 'xiu', confidence: 60, algorithm: 'Dice1 giảm mạnh' };
+  return { prediction: diff > 0 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Dice1 Change' };
+}
+
+function algorithmDEMA(historyAsc, period=10) {
+  const len = historyAsc.length;
+  if (len < period) return { prediction: historyAsc[len-1].ket_qua, confidence: 40, algorithm: `DEMA (${period})` };
+  const prices = historyAsc.map(i => i.tong);
+  const ema = (data, p) => {
+    const k = 2/(p+1);
+    let e = data[0];
+    for (let i=1; i<data.length; i++) e = data[i]*k + e*(1-k);
+    return e;
+  };
+  const ema1 = ema(prices.slice(-period), period);
+  const ema2 = ema([...Array(period).fill(ema1)], period); // EMA của EMA, xấp xỉ
+  const dema = 2*ema1 - ema2;
+  return { prediction: dema > prices[prices.length-1] ? 'tai' : 'xiu', confidence: 55, algorithm: `DEMA (${period})` };
+}
+
+function algorithmDoubleTopBottom(historyAsc) {
+  const slice = historyAsc.slice(-10);
+  const tops = [], bottoms = [];
+  for (let i=1; i<slice.length-1; i++) {
+    if (slice[i].tong > slice[i-1].tong && slice[i].tong > slice[i+1].tong) tops.push(slice[i].tong);
+    if (slice[i].tong < slice[i-1].tong && slice[i].tong < slice[i+1].tong) bottoms.push(slice[i].tong);
+  }
+  const last = slice[slice.length-1].tong;
+  if (tops.length >= 2 && Math.abs(tops[tops.length-1] - tops[tops.length-2]) < 2) return { prediction: 'xiu', confidence: 65, algorithm: 'Double Top' };
+  if (bottoms.length >= 2 && Math.abs(bottoms[bottoms.length-1] - bottoms[bottoms.length-2]) < 2) return { prediction: 'tai', confidence: 65, algorithm: 'Double Bottom' };
+  return { prediction: historyAsc[historyAsc.length-1].ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 50, algorithm: 'Double Pattern' };
+}
+
+function algorithmChiSquareDice(historyAsc) {
+  const slice = historyAsc.slice(-18);
+  const freq = Array(7).fill(0);
+  slice.forEach(i => { freq[i.xuc_xac_1]++; freq[i.xuc_xac_2]++; freq[i.xuc_xac_3]++; });
+  const expected = (slice.length*3)/6;
+  let chi2 = 0;
+  for (let i=1; i<=6; i++) chi2 += Math.pow(freq[i]-expected,2)/expected;
+  if (chi2 > 11.07) return { prediction: 'tai', confidence: 55, algorithm: 'Chi-square cao' };
+  return { prediction: 'xiu', confidence: 55, algorithm: 'Chi-square thấp' };
+}
+
+function algorithmRepeatSum(historyAsc) {
+  const last = historyAsc[historyAsc.length-1].tong;
+  const count = historyAsc.slice(-20).filter(i => i.tong === last).length;
+  if (count >= 3) return { prediction: last > 10 ? 'xiu' : 'tai', confidence: 60, algorithm: 'Repeat Sum nhiều' };
+  return { prediction: last > 10 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Repeat Sum' };
+}
+
+function algorithmDiceDiff12(historyAsc) {
+  const diffs = historyAsc.slice(-12).map(i => i.xuc_xac_1 - i.xuc_xac_2);
+  const avgDiff = diffs.reduce((a,b)=>a+b,0)/diffs.length;
+  if (avgDiff > 0.5) return { prediction: 'tai', confidence: 55, algorithm: 'Diff 1-2 dương' };
+  if (avgDiff < -0.5) return { prediction: 'xiu', confidence: 55, algorithm: 'Diff 1-2 âm' };
+  return { prediction: historyAsc[historyAsc.length-1].ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 45, algorithm: 'Diff 1-2' };
+}
+
+function algorithmFibExtension(historyAsc) {
+  const slice = historyAsc.slice(-8);
+  const high = Math.max(...slice.map(i=>i.tong));
+  const low = Math.min(...slice.map(i=>i.tong));
+  const diff = high - low;
+  const levels = [0.618, 1.0, 1.618].map(r => low + diff*r);
+  const last = historyAsc[historyAsc.length-1].tong;
+  if (last > levels[1]) return { prediction: 'tai', confidence: 60, algorithm: 'Fib Extension' };
+  if (last < levels[0]) return { prediction: 'xiu', confidence: 60, algorithm: 'Fib Extension' };
+  return { prediction: last > (levels[0]+levels[1])/2 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Fib Extension' };
+}
+
+function algorithmRatioChange(historyAsc) {
+  const recent = historyAsc.slice(-5);
+  const prev = historyAsc.slice(-10, -5);
+  const ratioRecent = recent.filter(i=>i.ket_qua==='tai').length/5;
+  const ratioPrev = prev.filter(i=>i.ket_qua==='tai').length/5;
+  if (ratioRecent > 0.7 && ratioPrev < 0.5) return { prediction: 'xiu', confidence: 60, algorithm: 'Ratio change' };
+  if (ratioRecent < 0.3 && ratioPrev > 0.5) return { prediction: 'tai', confidence: 60, algorithm: 'Ratio change' };
+  return { prediction: ratioRecent > 0.5 ? 'tai' : 'xiu', confidence: 50, algorithm: 'Ratio' };
+}
+
+function algorithmDoji(historyAsc) {
+  const last = historyAsc[historyAsc.length-1];
+  if (last.tong >= 10 && last.tong <= 11) return { prediction: last.ket_qua === 'tai' ? 'xiu' : 'tai', confidence: 55, algorithm: 'Doji' };
+  return { prediction: last.ket_qua, confidence: 50, algorithm: 'Doji' };
+}
+
+function algorithmBB_RSI(historyAsc) {
+  const bb = algorithmBollingerBands(historyAsc, 14, 2);
+  const rsi = algorithmRSITong(historyAsc, 14);
+  if (bb.prediction === rsi.prediction) return { prediction: bb.prediction, confidence: Math.max(bb.confidence, rsi.confidence), algorithm: 'BB+RSI agree' };
+  return { prediction: rsi.prediction, confidence: rsi.confidence, algorithm: 'BB+RSI disagree' };
+}
+
+// ==================== DANH SÁCH TẤT CẢ THUẬT TOÁN ====================
 function buildAlgorithmList() {
   return [
-    algorithmInvertLast,
-    algorithmFollowStreak,
-    (asc) => algorithmBreakLong(asc, 3),
-    (asc) => algorithmBreakLong(asc, 4),
-    makeFrequencyBalance(5),
-    makeFrequencyBalance(7),
-    makeFrequencyBalance(10),
-    makeFrequencyBalance(12),
-    makeFrequencyBalance(15),
-    makeFrequencyBalance(20),
-    (asc) => algorithmTotalTrend(asc, 3),
-    (asc) => algorithmTotalTrend(asc, 5),
-    (asc) => algorithmTotalTrend(asc, 7),
+    algorithmInvertLast, algorithmFollowStreak,
+    (asc) => algorithmBreakLong(asc, 3), (asc) => algorithmBreakLong(asc, 4),
+    makeFrequencyBalance(5), makeFrequencyBalance(7), makeFrequencyBalance(10),
+    makeFrequencyBalance(12), makeFrequencyBalance(15), makeFrequencyBalance(20),
+    (asc) => algorithmTotalTrend(asc, 3), (asc) => algorithmTotalTrend(asc, 5), (asc) => algorithmTotalTrend(asc, 7),
     algorithmEvenOddTrend,
-    (asc) => algorithmMirrorPattern(asc, 3),
-    (asc) => algorithmMirrorPattern(asc, 4),
-    (asc) => algorithmMirrorPattern(asc, 5),
-    algorithmStochasticOscillator,
-    algorithmMartingaleReverse,
-    algorithmMarkovChain1,
-    algorithmMarkovChain2,
-    (asc) => algorithmRSITong(asc, 7),
-    (asc) => algorithmRSITong(asc, 14),
-    (asc) => algorithmRSITong(asc, 21),
-    (asc) => algorithmBollingerBands(asc, 10, 2),
-    (asc) => algorithmBollingerBands(asc, 20, 2),
-    algorithmFibonacciRetracement,
-    algorithmCandlestickPattern,
-    (asc) => algorithmEMACross(asc, 5, 10),
-    (asc) => algorithmEMACross(asc, 7, 14),
-    (asc) => algorithmEMACross(asc, 3, 7),
-    (asc) => algorithmMACD(asc, 6, 13, 5),
-    (asc) => algorithmMACD(asc, 5, 10, 4),
-    (asc) => algorithmMACD(asc, 8, 17, 7),
-    (asc) => algorithmBinomialBalance(asc, 15),
-    (asc) => algorithmBinomialBalance(asc, 25),
-    algorithmDiceEvenOdd,
-    algorithmCandlestick3,
-    (asc) => algorithmMovingAverageThreshold(asc, 8),
-    (asc) => algorithmMovingAverageThreshold(asc, 12),
-    (asc) => algorithmStdDev(asc, 10),
-    (asc) => algorithmStdDev(asc, 15),
-    algorithmDiceComponentTrend,
-    algorithmFibonacciSequence,
-    (asc) => algorithmRSIResult(asc, 10),
-    (asc) => algorithmRSIResult(asc, 20),
-    (asc) => {
-      const len = asc.length;
-      if (len < 2) return { prediction: asc[len-1].ket_qua, confidence: 40, algorithm: 'TB 2 phiên' };
-      const avg = (asc[len-1].tong + asc[len-2].tong)/2;
-      return { prediction: avg > 10.5 ? 'tai' : 'xiu', confidence: Math.abs(avg-10.5)*10, algorithm: 'TB 2 phiên' };
-    },
-    (asc) => {
-      const len = asc.length;
-      if (len < 6) return { prediction: asc[len-1].ket_qua, confidence: 40, algorithm: 'So sánh 3-3' };
-      const sumRecent = asc.slice(-3).reduce((s,i)=>s+i.tong,0);
-      const sumPrev = asc.slice(-6,-3).reduce((s,i)=>s+i.tong,0);
-      return { prediction: sumRecent > sumPrev ? 'tai' : 'xiu', confidence: Math.min(70, Math.abs(sumRecent-sumPrev)/2), algorithm: 'So sánh 3-3' };
-    },
-    (asc) => {
-      const last10 = asc.slice(-10);
-      let count = 0;
-      last10.forEach(i => { if (i.xuc_xac_1 > 3) count++; });
-      const pred = count > 5 ? 'tai' : 'xiu';
-      return { prediction: pred, confidence: 50 + Math.abs(count-5)*5, algorithm: 'Xúc xắc 1 > 3' };
-    }
+    (asc) => algorithmMirrorPattern(asc, 3), (asc) => algorithmMirrorPattern(asc, 4), (asc) => algorithmMirrorPattern(asc, 5),
+    algorithmStochasticOscillator, algorithmMartingaleReverse,
+    algorithmMarkovChain1, algorithmMarkovChain2,
+    (asc) => algorithmRSITong(asc, 7), (asc) => algorithmRSITong(asc, 14), (asc) => algorithmRSITong(asc, 21),
+    (asc) => algorithmBollingerBands(asc, 10, 2), (asc) => algorithmBollingerBands(asc, 20, 2),
+    algorithmFibonacciRetracement, algorithmCandlestickPattern,
+    (asc) => algorithmEMACross(asc, 5, 10), (asc) => algorithmEMACross(asc, 7, 14), (asc) => algorithmEMACross(asc, 3, 7),
+    (asc) => algorithmMACD(asc, 6, 13, 5), (asc) => algorithmMACD(asc, 5, 10, 4), (asc) => algorithmMACD(asc, 8, 17, 7),
+    (asc) => algorithmBinomialBalance(asc, 15), (asc) => algorithmBinomialBalance(asc, 25),
+    algorithmDiceEvenOdd, algorithmCandlestick3,
+    (asc) => algorithmMovingAverageThreshold(asc, 8), (asc) => algorithmMovingAverageThreshold(asc, 12),
+    (asc) => algorithmStdDev(asc, 10), (asc) => algorithmStdDev(asc, 15),
+    algorithmDiceComponentTrend, algorithmFibonacciSequence,
+    (asc) => algorithmRSIResult(asc, 10), (asc) => algorithmRSIResult(asc, 20),
+    (asc) => { const len = asc.length; if (len < 2) return { prediction: asc[len-1].ket_qua, confidence: 40, algorithm: 'TB 2 phiên' }; const avg = (asc[len-1].tong + asc[len-2].tong)/2; return { prediction: avg > 10.5 ? 'tai' : 'xiu', confidence: Math.abs(avg-10.5)*10, algorithm: 'TB 2 phiên' }; },
+    (asc) => { const len = asc.length; if (len < 6) return { prediction: asc[len-1].ket_qua, confidence: 40, algorithm: 'So sánh 3-3' }; const sumRecent = asc.slice(-3).reduce((s,i)=>s+i.tong,0); const sumPrev = asc.slice(-6,-3).reduce((s,i)=>s+i.tong,0); return { prediction: sumRecent > sumPrev ? 'tai' : 'xiu', confidence: Math.min(70, Math.abs(sumRecent-sumPrev)/2), algorithm: 'So sánh 3-3' }; },
+    (asc) => { const last10 = asc.slice(-10); let count = 0; last10.forEach(i => { if (i.xuc_xac_1 > 3) count++; }); const pred = count > 5 ? 'tai' : 'xiu'; return { prediction: pred, confidence: 50 + Math.abs(count-5)*5, algorithm: 'Xúc xắc 1 > 3' }; },
+    algorithmMomentum, (asc) => algorithmMomentum(asc, 3), (asc) => algorithmMomentum(asc, 7),
+    algorithmROC, (asc) => algorithmROC(asc, 3), (asc) => algorithmROC(asc, 10),
+    algorithmTSI, (asc) => algorithmTSI(asc, 4, 7),
+    algorithmKeltner, (asc) => algorithmKeltner(asc, 14, 1.8),
+    algorithmATR, (asc) => algorithmATR(asc, 5),
+    algorithmADX, (asc) => algorithmADX(asc, 5),
+    algorithmParabolicSAR, (asc) => algorithmParabolicSAR(asc, 0.03, 0.25),
+    algorithmEntropy, (asc) => algorithmEntropy(asc, 15),
+    algorithmPoisson, (asc) => algorithmPoisson(asc, 20),
+    algorithmLinearRegression, (asc) => algorithmLinearRegression(asc, 8),
+    algorithmAR1,
+    algorithmFractal,
+    algorithmDiceFrequency1, (asc) => algorithmDiceFrequency1(asc, 12),
+    algorithmAvg3Gap,
+    algorithmPivot, (asc) => algorithmPivot(asc, 7),
+    algorithmElliott,
+    algorithmHullMA, (asc) => algorithmHullMA(asc, 8), (asc) => algorithmHullMA(asc, 14),
+    algorithmStdDice2,
+    algorithmCorrDice13,
+    algorithmEvenOddDice3,
+    algorithmCycle2,
+    algorithmRange, (asc) => algorithmRange(asc, 12),
+    algorithmHarami,
+    algorithmTwoSum,
+    algorithmIchimoku, (asc) => algorithmIchimoku(asc, 7, 22),
+    algorithmTenEleven,
+    algorithmAroon, (asc) => algorithmAroon(asc, 10),
+    algorithmDeviation3,
+    algorithmTriple,
+    algorithmDice1Change,
+    algorithmDEMA, (asc) => algorithmDEMA(asc, 8),
+    algorithmDoubleTopBottom,
+    algorithmChiSquareDice,
+    algorithmRepeatSum,
+    algorithmDiceDiff12,
+    algorithmFibExtension,
+    algorithmRatioChange,
+    algorithmDoji,
+    algorithmBB_RSI
   ];
 }
 
-// ==================== BRAIN VIP (TỔNG HỢP TẤT CẢ THUẬT TOÁN) ====================
+// ==================== BRAIN VIP (TRỌNG SỐ) ====================
 function brainVIP(historyAsc) {
   const algorithms = buildAlgorithmList();
-  const results = algorithms.map(algoFn => algoFn(historyAsc));
-  const votes = { tai: 0, xiu: 0 };
-  results.forEach(r => votes[r.prediction]++);
-  const totalVotes = votes.tai + votes.xiu;
+  const results = algorithms.map(fn => fn(historyAsc));
+  const weightedVotes = { tai: 0, xiu: 0 };
+  let totalWeight = 0;
+  results.forEach(r => {
+    const w = r.confidence / 100;
+    weightedVotes[r.prediction] += w;
+    totalWeight += w;
+  });
   const latest = historyAsc[historyAsc.length - 1];
-  const topPrediction = votes.tai > votes.xiu ? 'tai' : (votes.xiu > votes.tai ? 'xiu' : (latest.ket_qua === 'tai' ? 'xiu' : 'tai'));
-  const topConfidence = (votes[topPrediction] / totalVotes) * 100;
+  let topPrediction, topConfidence;
+  if (weightedVotes.tai > weightedVotes.xiu) {
+    topPrediction = 'tai';
+    topConfidence = (weightedVotes.tai / totalWeight) * 100;
+  } else if (weightedVotes.xiu > weightedVotes.tai) {
+    topPrediction = 'xiu';
+    topConfidence = (weightedVotes.xiu / totalWeight) * 100;
+  } else {
+    topPrediction = latest.ket_qua === 'tai' ? 'xiu' : 'tai';
+    topConfidence = 50;
+  }
   return {
     prediction: topPrediction,
     confidence: +topConfidence.toFixed(2),
-    algorithmsUsed: results.map(r => ({ name: r.algorithm, predict: r.prediction, conf: r.confidence }))
+    algorithmsUsed: results.map(r => ({ name: r.algorithm, predict: r.prediction, conf: r.confidence })),
+    totalAlgorithms: results.length
   };
 }
 
@@ -563,11 +1051,12 @@ function predictAndSave(historyList, game) {
 
   const newPred = {
     id: ++predictionIdCounter,
-    game: game,
-    predictedPhien: predictedPhien,
+    game,
+    predictedPhien,
     prediction: brain.prediction,
     confidence: brain.confidence,
     algorithmsUsed: brain.algorithmsUsed,
+    totalAlgorithms: brain.totalAlgorithms,
     timestamp: new Date().toISOString(),
     status: 'pending',
     actualKetQua: null,
@@ -596,30 +1085,47 @@ function predictAndSave(historyList, game) {
     tong: latest.tong,
     ket_qua: latest.ket_qua,
     phien_hien_tai: predictedPhien,
-    pattern: pattern,
+    pattern,
     du_doan: brain.prediction,
     do_tin_cay: brain.confidence + '%',
     admin: ADMIN_NAME,
     update: formatTime(new Date()),
-    thuat_toan_su_dung: brain.algorithmsUsed,
+    thuat_toan_su_dung: brain.algorithmsUsed.slice(0, 10),
+    total_algorithms: brain.totalAlgorithms,
     prediction_id: newPred.id
   };
 }
 
-function sendCompactJSON(res, data) {
-  res.setHeader('Content-Type', 'application/json');
-  res.send(JSON.stringify(data));
-}
-
 // ==================== ENDPOINTS ====================
+app.get('/', (req, res) => {
+  res.json({
+    message: '🚀 Tài Xỉu Siêu VIP Predictor',
+    admin: ADMIN_NAME,
+    uptime: Math.floor((Date.now() - startTime) / 1000) + 's',
+    ping_count: pingCount,
+    total_algorithms: buildAlgorithmList().length,
+    endpoints: {
+      history_lc79: '/api/history/lc79',
+      history_md5: '/api/history/taixiumd5',
+      predict_lc79: '/api/predict/lc79',
+      predict_md5: '/api/predict/taixiumd5',
+      predictions_list: '/api/predictions/:game?status=pending|correct|incorrect',
+      delete_predictions: '/api/predictions/:game (DELETE)',
+      dashboard_lc79: '/dashboard/lc79',
+      dashboard_md5: '/dashboard/taixiumd5',
+      ping: '/ping'
+    }
+  });
+});
+
 app.get('/api/history/:game', async (req, res) => {
   const game = req.params.game === 'lc79' ? 'lc79' : 'md5';
   const apiUrl = game === 'lc79' ? API_URL_HU : API_URL_MD5;
   try {
     const data = await fetchHistory(apiUrl);
-    sendCompactJSON(res, data);
+    res.json(data);
   } catch (err) {
-    res.status(500).json({ error: `Failed to fetch data for ${game}` });
+    res.status(500).json({ error: `Failed to fetch data for ${game}`, details: err.message });
   }
 });
 
@@ -628,10 +1134,11 @@ app.get('/api/predict/:game', async (req, res) => {
   const apiUrl = game === 'lc79' ? API_URL_HU : API_URL_MD5;
   try {
     const history = await fetchHistory(apiUrl);
+    if (!history || history.length === 0) throw new Error('Empty history');
     const prediction = predictAndSave(history, game);
-    sendCompactJSON(res, prediction);
+    res.json(prediction);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to generate prediction' });
+    res.status(500).json({ error: 'Failed to generate prediction', details: err.message });
   }
 });
 
@@ -653,14 +1160,22 @@ app.get('/api/predictions/:game', (req, res) => {
 
 app.delete('/api/predictions/:game', (req, res) => {
   const gameKey = req.params.game === 'lc79' ? 'lc79' : 'md5';
-  const initialLength = predictions.length;
+  let removed = 0;
   for (let i = predictions.length - 1; i >= 0; i--) {
-    if (predictions[i].game === gameKey) predictions.splice(i, 1);
+    if (predictions[i].game === gameKey) {
+      predictions.splice(i, 1);
+      removed++;
+    }
   }
-  res.json({ message: `Deleted predictions for ${gameKey}`, removed: initialLength - predictions.length });
+  res.json({ message: `Deleted ${removed} predictions for ${gameKey}` });
 });
 
-// ==================== DASHBOARD HTML ====================
+app.get('/ping', (req, res) => {
+  pingCount++;
+  res.json({ ping_count: pingCount, time: formatTime(new Date()) });
+});
+
+// ==================== DASHBOARD ĐẸP ====================
 app.get('/dashboard/:game', (req, res) => {
   const gameKey = req.params.game === 'lc79' ? 'lc79' : 'md5';
   const gameName = gameKey === 'lc79' ? 'Tài Xỉu Hũ' : 'Tài Xỉu MD5';
@@ -672,105 +1187,94 @@ app.get('/dashboard/:game', (req, res) => {
   const accuracy = (correct + incorrect) > 0 ? (correct / (correct + incorrect) * 100).toFixed(2) : 'N/A';
   const preds = predictions.filter(p => p.game === gameKey).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
+  const recentPreds = preds.slice(0, 10).reverse();
+  const chartLabels = recentPreds.map(p => '#' + p.predictedPhien);
+  const chartData = recentPreds.map(p => p.prediction === 'tai' ? 1 : -1);
+  const chartStatus = recentPreds.map(p => p.status === 'correct' ? 1 : (p.status === 'incorrect' ? -1 : 0));
+
   let html = `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="UTF-8">
-    <title>Dashboard ${gameName} - ${ADMIN_NAME}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-      h1 { color: #333; }
-      .stats { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-      .stat-box { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); min-width: 100px; text-align: center; }
-      .stat-box h3 { margin: 0 0 5px 0; font-size: 14px; color: #666; }
-      .stat-box .value { font-size: 24px; font-weight: bold; }
-      .correct { color: green; }
-      .incorrect { color: red; }
-      .pending { color: orange; }
-      table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-      th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-      th { background: #4CAF50; color: white; }
-      tr:hover { background: #f1f1f1; }
-      .filter { margin-bottom: 15px; }
-      button { padding: 8px 16px; margin-right: 5px; cursor: pointer; }
-      .refresh { margin-bottom: 15px; }
-      @media (max-width: 600px) { .stats { flex-direction: column; } }
-    </style>
-  </head>
-  <body>
-    <h1>📊 Dashboard Dự Đoán ${gameName}</h1>
-    <p>Admin: <strong>${ADMIN_NAME}</strong> | Server time: ${formatTime(new Date())}</p>
+  <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Dashboard ${gameName} - ${ADMIN_NAME}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; background: linear-gradient(135deg, #0f2027, #203a43, #2c5364); color: #fff; }
+    .container { max-width: 1200px; margin: auto; padding: 20px; }
+    h1 { text-align: center; font-size: 2.5em; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; margin-bottom: 30px; }
+    .stat-box { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); padding: 20px; border-radius: 15px; text-align: center; }
+    .stat-box h3 { margin: 0; font-size: 14px; }
+    .stat-box .value { font-size: 32px; font-weight: bold; }
+    .correct { color: #4caf50; } .incorrect { color: #f44336; } .pending { color: #ff9800; }
+    .chart-container { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); border-radius: 15px; padding: 20px; margin-bottom: 20px; }
+    canvas { max-height: 300px; }
+    .filter { margin-bottom: 20px; }
+    button { padding: 10px 20px; border: none; border-radius: 25px; cursor: pointer; font-weight: bold; margin-right: 10px; background: rgba(255,255,255,0.2); color: #fff; }
+    button.active, button:hover { background: #4caf50; }
+    table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.05); border-radius: 15px; overflow: hidden; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
+    th { background: rgba(0,0,0,0.3); }
+    .status-badge { padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+    .status-correct { background: #4caf50; } .status-incorrect { background: #f44336; } .status-pending { background: #ff9800; }
+  </style></head><body>
+  <div class="container">
+    <h1>📊 Dashboard ${gameName}</h1>
+    <p style="text-align:center">Admin: ${ADMIN_NAME} | Time: ${formatTime(new Date())} | Ping: ${pingCount}</p>
     <div class="stats">
-      <div class="stat-box"><h3>Tổng dự đoán</h3><div class="value">${total}</div></div>
+      <div class="stat-box"><h3>Tổng</h3><div class="value">${total}</div></div>
       <div class="stat-box"><h3>Đúng</h3><div class="value correct">${correct}</div></div>
       <div class="stat-box"><h3>Sai</h3><div class="value incorrect">${incorrect}</div></div>
-      <div class="stat-box"><h3>Đang chờ</h3><div class="value pending">${pending}</div></div>
-      <div class="stat-box"><h3>Tỉ lệ đúng</h3><div class="value">${accuracy}</div></div>
+      <div class="stat-box"><h3>Chờ</h3><div class="value pending">${pending}</div></div>
+      <div class="stat-box"><h3>Tỉ lệ đúng</h3><div class="value" style="color:#2196f3">${accuracy}</div></div>
     </div>
+    <div class="chart-container"><canvas id="chart"></canvas></div>
     <div class="filter">
-      <button onclick="window.location.href='?status='">Tất cả</button>
-      <button onclick="window.location.href='?status=pending'">Đang chờ</button>
-      <button onclick="window.location.href='?status=correct'">Đúng</button>
-      <button onclick="window.location.href='?status=incorrect'">Sai</button>
-    </div>
-    <div class="refresh">
+      <button class="active" onclick="filter('')">Tất cả</button>
+      <button onclick="filter('pending')">Đang chờ</button>
+      <button onclick="filter('correct')">Đúng</button>
+      <button onclick="filter('incorrect')">Sai</button>
       <button onclick="location.reload()">🔄 Làm mới</button>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Phiên dự đoán</th>
-          <th>Dự đoán</th>
-          <th>Thực tế</th>
-          <th>Trạng thái</th>
-          <th>Độ tin cậy</th>
-          <th>Thời gian</th>
-        </tr>
-      </thead>
-      <tbody>
+    <table><thead><tr><th>ID</th><th>Phiên</th><th>Dự đoán</th><th>Thực tế</th><th>Trạng thái</th><th>Độ tin cậy</th><th>Thời gian</th></tr></thead><tbody>
   `;
 
   for (const p of preds) {
-    const statusClass = p.status === 'correct' ? 'correct' : (p.status === 'incorrect' ? 'incorrect' : 'pending');
-    html += `
-        <tr>
-          <td>${p.id}</td>
-          <td>${p.predictedPhien}</td>
-          <td><strong>${p.prediction}</strong></td>
-          <td>${p.actualKetQua || '—'}</td>
-          <td class="${statusClass}">${p.status}</td>
-          <td>${p.confidence}%</td>
-          <td>${new Date(p.timestamp).toLocaleString()}</td>
-        </tr>
-    `;
+    const statusClass = `status-${p.status}`;
+    const statusText = p.status === 'correct' ? 'Đúng' : (p.status === 'incorrect' ? 'Sai' : 'Chờ');
+    html += `<tr>
+      <td>${p.id}</td><td>${p.predictedPhien}</td><td><strong>${p.prediction.toUpperCase()}</strong></td>
+      <td>${p.actualKetQua || '—'}</td><td><span class="status-badge ${statusClass}">${statusText}</span></td>
+      <td>${p.confidence}%</td><td>${new Date(p.timestamp).toLocaleString()}</td>
+    </tr>`;
   }
 
-  html += `
-      </tbody>
-    </table>
-    <script>
-      const urlParams = new URLSearchParams(window.location.search);
-      const status = urlParams.get('status');
-      if (status) {
-        document.querySelectorAll('.filter button').forEach(btn => {
-          if (btn.textContent.toLowerCase().includes(status)) btn.style.background = '#ddd';
-        });
-      }
-    </script>
-  </body>
-  </html>
-  `;
-
+  html += `</tbody></table></div>
+  <script>
+    function filter(status) { const url = new URL(window.location); if (status) url.searchParams.set('status', status); else url.searchParams.delete('status'); window.location = url; }
+    new Chart(document.getElementById('chart'), {
+      type: 'line', data: {
+        labels: ${JSON.stringify(chartLabels)},
+        datasets: [
+          { label: 'Dự đoán (Tài=1, Xỉu=-1)', data: ${JSON.stringify(chartData)}, borderColor: '#4caf50', yAxisID: 'y' },
+          { label: 'Trạng thái (Đúng=1, Sai=-1, Chờ=0)', data: ${JSON.stringify(chartStatus)}, borderColor: '#ff9800', yAxisID: 'y1' }
+        ]
+      },
+      options: { responsive: true, plugins: { legend: { labels: { color: '#fff' } } }, scales: { y: { ticks: { color: '#fff' } }, y1: { position: 'right', ticks: { color: '#fff' } }, x: { ticks: { color: '#fff' } } } }
+    });
+  </script></body></html>`;
   res.send(html);
 });
 
-// ==================== START SERVER ====================
+// ==================== TỰ ĐỘNG PING MỖI PHÚT ====================
+setInterval(() => {
+  axios.get(`http://localhost:${PORT}/ping`).then(() => {
+    console.log(`[PING] Tự ping thành công, tổng: ${pingCount}`);
+  }).catch(() => {
+    pingCount++;
+    console.log(`[PING] Tăng thủ công, tổng: ${pingCount}`);
+  });
+}, 60000);
+
 app.listen(PORT, () => {
-  console.log(`Server đang chạy trên cổng ${PORT}`);
-  console.log(`Admin: ${ADMIN_NAME}`);
-  console.log(`Tất cả thuật toán đã được gộp vào /api/predict/:game`);
-  console.log(`Dashboard: /dashboard/:game`);
+  console.log(`✅ Server SIÊU SIÊU SIÊU VIP chạy trên cổng ${PORT}`);
+  console.log(`Tổng thuật toán: ${buildAlgorithmList().length}`);
 });
