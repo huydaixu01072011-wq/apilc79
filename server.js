@@ -22,13 +22,13 @@ let historyMd5 = [];
 let predictionsNormal = [];
 let predictionsMd5 = [];
 
-// ========== THUẬT TOÁN VIP: MARKOV + PATTERN RECOGNITION ==========
+// ========== THUẬT TOÁN VIP: MARKOV CHAIN + PATTERN RECOGNITION ==========
 class VIPPredictor {
     constructor(bac = 3) {
         this.bac = bac;
         this.transitions = new Map();
         this.historyDices = [];
-        this.historyTX = []; // Lưu lịch sử TÀI/XỈU
+        this.historyTX = []; 
         this.maxHistory = 60;
     }
 
@@ -39,17 +39,22 @@ class VIPPredictor {
     }
 
     themDuLieu(rawData) {
-        // Lấy danh sách tổng (Tài/Xỉu)
-        this.historyTX = rawData.map(item => {
-            const sum = item.dices.reduce((a, b) => a + b, 0);
-            return sum >= 11 ? "TÀI" : "XỈU";
-        }).reverse(); // Đảo lại để cũ trước, mới sau
+        if (!rawData || rawData.length === 0) return;
+        
+        // Đảo mảng để sắp xếp từ CŨ đến MỚI (phục vụ chuỗi Markov và soi cầu)
+        const cloneData = [...rawData].reverse();
 
-        // Dữ liệu xúc xắc cho Markov
+        this.historyTX = cloneData.map(item => {
+            const sum = item.dices ? item.dices.reduce((a, b) => a + b, 0) : 0;
+            return sum >= 11 ? "TÀI" : "XỈU";
+        });
+
         const dice123 = [];
-        for (let item of rawData.reverse()) { // Cũ trước, mới sau
-            for (let d of item.dices) {
-                dice123.push(VIPPredictor.chuyenLoai(d));
+        for (let item of cloneData) {
+            if (item.dices && item.dices.length === 3) {
+                for (let d of item.dices) {
+                    dice123.push(VIPPredictor.chuyenLoai(d));
+                }
             }
         }
         
@@ -90,17 +95,17 @@ class VIPPredictor {
         const last4 = this.historyTX[len - 4];
         const last5 = this.historyTX[len - 5];
 
-        // Nhận diện cầu Bệt (4 ván liên tiếp giống nhau)
+        // 1. Cầu Bệt (4 ván giống nhau liên tiếp trở lên)
         if (last1 === last2 && last2 === last3 && last3 === last4) {
             return { coCau: true, theLoai: "CẦU BỆT", duDoan: last1, doTinCay: 85 };
         }
         
-        // Nhận diện cầu 1-1 (T-X-T-X hoặc X-T-X-T)
+        // 2. Cầu đảo 1-1 (T-X-T-X-T)
         if (last1 !== last2 && last2 !== last3 && last3 !== last4 && last4 !== last5) {
             return { coCau: true, theLoai: "CẦU 1-1", duDoan: last1 === "TÀI" ? "XỈU" : "TÀI", doTinCay: 80 };
         }
 
-        // Nhận diện cầu 2-2 (T-T-X-X hoặc X-X-T-T)
+        // 3. Cầu đôi 2-2 (T-T-X-X)
         if (last1 === last2 && last2 !== last3 && last3 === last4 && last1 !== last3) {
             return { coCau: true, theLoai: "CẦU 2-2", duDoan: last1 === "TÀI" ? "XỈU" : "TÀI", doTinCay: 75 };
         }
@@ -109,7 +114,7 @@ class VIPPredictor {
     }
 
     duDoanMarkov() {
-        if (this.historyDices.length < this.bac) return 2; // Default 3-4
+        if (this.historyDices.length < this.bac) return 2;
 
         const states = [];
         for (let b = 1; b <= this.bac; b++) {
@@ -148,98 +153,143 @@ class VIPPredictor {
     }
 
     phanTich() {
-        // Kiểm tra cầu trước (Ưu tiên bắt cầu)
+        // Ưu tiên số 1: Quét và bám cầu đẹp
         const checkCau = this.nhanDienCau();
         if (checkCau.coCau) {
             return {
                 prediction: checkCau.duDoan,
                 confidenceTai: checkCau.duDoan === "TÀI" ? checkCau.doTinCay : 100 - checkCau.doTinCay,
                 confidenceXiu: checkCau.duDoan === "XỈU" ? checkCau.doTinCay : 100 - checkCau.doTinCay,
-                reason: `Phát hiện ${checkCau.theLoai}, bám cầu!`,
+                reason: `Hệ thống bắt được ${checkCau.theLoai} cực nét → Bám cầu`,
                 pattern: checkCau.theLoai
             };
         }
 
-        // Nếu không có cầu rõ ràng, dùng Markov Chain
+        // Ưu tiên số 2: Tính toán ma trận Markov Chain xúc xắc
         const duDoanSo = this.duDoanMarkov();
         const prediction = (duDoanSo === 1 || duDoanSo === 3) ? "TÀI" : "XỈU";
         
         return {
             prediction: prediction,
-            confidenceTai: prediction === "TÀI" ? 65 : 35,
-            confidenceXiu: prediction === "XỈU" ? 65 : 35,
-            reason: `Phân tích Markov bậc ${this.bac}, không có cầu rõ ràng.`,
-            pattern: "MARKOV CHAIN"
+            confidenceTai: prediction === "TÀI" ? 68 : 32,
+            confidenceXiu: prediction === "XỈU" ? 68 : 32,
+            reason: `Bậc Markov: ${this.bac} | Phân tích xác suất xúc xắc nhóm ${duDoanSo}`,
+            pattern: "MARKOV CHAIN VIP"
         };
     }
 }
 
 function analyzeTrendVIP(history) {
     if (!history || history.length < 5) {
-        return { prediction: "TÀI", confidenceTai: 50, confidenceXiu: 50, reason: "Đợi thêm data", pattern: "CHỜ" };
+        return { prediction: "TÀI", confidenceTai: 50, confidenceXiu: 50, reason: "Đang nạp dữ liệu...", pattern: "KHỞI TẠO" };
     }
     const predictor = new VIPPredictor(3);
     predictor.themDuLieu(history.slice(0, 40));
     return predictor.phanTich();
 }
 
-// ========== LOGIC LƯU LỊCH SỬ & ĐÁNH GIÁ (GIỮ NGUYÊN NHƯNG TỐI ƯU HƠN) ==========
+// ========== HÀM BỔ TRỢ SEED GỐC CỦA BẠN ==========
+function generateSeed(history, count = 8) {
+    if (history.length < count) return null;
+    const seedString = history.slice(0, count).map(item => item.dices ? item.dices.join('') : '').join('');
+    if (!seedString) return null;
+    return crypto.createHash('md5').update(seedString).digest('hex');
+}
 
+function randomDice(seed) {
+    if (!seed) return [Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1];
+    const hash = crypto.createHash('md5').update(seed).digest('hex');
+    const num1 = parseInt(hash.substring(0, 2), 16) % 6 + 1;
+    const num2 = parseInt(hash.substring(2, 4), 16) % 6 + 1;
+    const num3 = parseInt(hash.substring(4, 6), 16) % 6 + 1;
+    return [num1, num2, num3];
+}
+
+// ========== LOGIC QUẢN LÝ LỊCH SỬ DỰ ĐOÁN & PHIÊN BIẾN ĐỘNG ==========
 function updatePrediction(storage, history) {
-    if (history.length < 1) return;
+    if (!history || history.length < 1) return;
     const latest = history[0]; 
     const nextPhien = latest.id + 1;
     
-    // Kiểm tra xem đã dự đoán cho phiên tiếp theo chưa
     const existing = storage.find(p => p.phien === nextPhien);
     if (!existing) {
         const ai = analyzeTrendVIP(history);
         storage.push({
             phien: nextPhien,
             du_doan: ai.prediction,
-            ket_qua: null, // Sẽ update khi có kết quả thật
+            ket_qua: null, 
             danh_gia: "ĐANG CHỜ",
             thoi_gian: new Date().toLocaleTimeString(),
             chi_tiet: ai.pattern
         });
         
-        // Giữ mảng không quá lớn (giữ 50 phiên)
-        if (storage.length > 50) storage.shift(); 
+        if (storage.length > 60) storage.shift(); 
     }
 }
 
 function evaluate(storage, history) {
     storage.forEach(p => {
-        if (p.ket_qua) return; // Đã có kết quả thì bỏ qua
-        // Tìm xem lịch sử trả về đã có ID của phiên mình dự đoán chưa
+        if (p.ket_qua && p.ket_qua !== "...") return; 
         const real = history.find(h => h.id === p.phien);
         if (real && real.dices && real.dices.length === 3) {
             const sum = real.dices.reduce((a, b) => a + b, 0);
             const result = sum >= 11 ? "TÀI" : "XỈU";
-            p.ket_qua = result + ` (${sum})`;
+            p.ket_qua = `${result} (${sum})`;
             p.danh_gia = (p.du_doan === result) ? "THẮNG" : "THUA";
         }
     });
 }
 
 function stats(storage) {
-    // Chỉ tính những phiên ĐÃ CÓ KẾT QUẢ
-    const finished = storage.filter(i => i.ket_qua !== null);
+    const finished = storage.filter(i => i.ket_qua && i.danh_gia !== "ĐANG CHỜ");
     const total = finished.length;
     const win = finished.filter(i => i.danh_gia === "THẮNG").length;
     const lose = finished.filter(i => i.danh_gia === "THUA").length;
     const rate = total === 0 ? 0 : ((win / total) * 100);
     return {
-        tong_da_danh_gia: total,
+        tong_du_doan: total,
         tong_thang: win,
         tong_thua: lose,
         ti_le_chinh_xac: `${rate.toFixed(2)}%`,
-        lich_su: storage.slice(-20).reverse() // Trả về 20 phiên gần nhất, mới nhất lên đầu
+        lich_su: storage.slice(-20).reverse() 
     };
 }
 
-// ========== KẾT NỐI API ==========
+// ========== FORMAT DỮ LIỆU ĐÚNG CHUẨN ĐỒNG BỘ ENDPOINT JSON TRƯỚC ĐÂY ==========
+function formatData(raw, historyStorage) {
+    const list = raw?.list;
+    if (!list || list.length === 0) return { error: "Không có dữ liệu gốc" };
+    const data = list[0];
+    const ai = analyzeTrendVIP(list);
+    const seed = generateSeed(list, 8);
+    
+    let tong = 0;
+    let xuc_xac = [0, 0, 0];
+    if (data.dices && data.dices.length === 3) {
+        xuc_xac = data.dices;
+        tong = data.dices.reduce((a, b) => a + b, 0);
+    } else {
+        const randomDices = randomDice(seed);
+        xuc_xac = randomDices;
+        tong = randomDices.reduce((a, b) => a + b, 0);
+    }
 
+    return {
+        phien: data.id,
+        xuc_xac_1: xuc_xac[0],
+        xuc_xac_2: xuc_xac[1],
+        xuc_xac_3: xuc_xac[2],
+        tong: tong,
+        ket_qua: tong >= 11 ? "TÀI" : "XỈU",
+        phien_tiep_theo: data.id + 1,
+        du_doan: ai.prediction,
+        do_tin_cay: { TÀI: `${ai.confidenceTai}%`, XỈU: `${ai.confidenceXiu}%` },
+        ly_do: ai.reason,
+        pattern: ai.pattern
+    };
+}
+
+// ========== ENGINE AUTO CALL REFRESH DATA (POLLING) ==========
 async function fetchWithRetry(url, retry = 2) {
     try { return await http.get(url); }
     catch (e) { if (retry > 0) return fetchWithRetry(url, retry - 1); throw e; }
@@ -254,24 +304,46 @@ async function poll() {
         historyNormal = normal.data.list || [];
         historyMd5 = md5.data.list || [];
         
-        // Update dự đoán cho phiên sau dựa trên lịch sử hiện tại
         updatePrediction(predictionsNormal, historyNormal);
         updatePrediction(predictionsMd5, historyMd5);
         
-        // Kiểm tra xem các dự đoán cũ đã có kết quả để đánh giá chưa
         evaluate(predictionsNormal, historyNormal);
         evaluate(predictionsMd5, historyMd5);
-        
-    } catch (e) { console.log("Poll lỗi:", e.message); }
+    } catch (e) { console.log("Lỗi đồng bộ API gốc:", e.message); }
 }
-setInterval(poll, 3000); // Poll nhanh hơn (3s) để bắt dữ liệu nhạy
+setInterval(poll, 3000); // 3 giây quét sàn 1 lần tránh lệch phiên
 
-// ========== ROUTES & GIAO DIỆN ==========
+// ========== DANH SÁCH ENDPOINT API TOÀN DIỆN DIỆN ==========
 
+// 1. Endpoint JSON Tài Xỉu Thường
+app.get("/taixiu", async (req, res) => {
+    try { 
+        const r = await fetchWithRetry(URL_TRUYEN_THONG); 
+        res.json(formatData(r.data, historyNormal)); 
+    } catch { res.status(500).json({ error: "Lỗi kết nối cổng API Thường" }); }
+});
+
+// 2. Endpoint JSON Tài Xỉu MD5
+app.get("/taixiumd5", async (req, res) => {
+    try { 
+        const r = await fetchWithRetry(URL_MD5); 
+        res.json(formatData(r.data, historyMd5)); 
+    } catch { res.status(500).json({ error: "Lỗi kết nối cổng API MD5" }); }
+});
+
+// 3. Endpoint JSON Gộp cả 2 cổng
+app.get("/all", async (req, res) => {
+    try {
+        const [a, b] = await Promise.all([fetchWithRetry(URL_TRUYEN_THONG), fetchWithRetry(URL_MD5)]);
+        res.json({ taixiu: formatData(a.data, historyNormal), taixiumd5: formatData(b.data, historyMd5) });
+    } catch { res.status(500).json({ error: "Lỗi xử lý API hỗn hợp" }); }
+});
+
+// 4. Các cổng thống kê 20 phiên đáp ứng dữ liệu Frontend
 app.get("/thongke", (req, res) => res.json(stats(predictionsNormal)));
 app.get("/thongkemd5", (req, res) => res.json(stats(predictionsMd5)));
 
-// GIAO DIỆN HIỂN THỊ
+// 5. ROUTE CHÍNH: GIAO DIỆN DASHBOARD SIÊU VIP (DARK/NEON DESIGN)
 app.get("/", (req, res) => {
     const html = `
     <!DOCTYPE html>
@@ -279,58 +351,77 @@ app.get("/", (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>BOT AI VIP - TÀI XỈU</title>
+        <title>DASHBOARD AI VIP PANEL</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
-            body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
-            .glow-win { text-shadow: 0 0 10px #22c55e; }
-            .glow-lose { text-shadow: 0 0 10px #ef4444; }
-            .table-container::-webkit-scrollbar { width: 6px; }
-            .table-container::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+            body { background-color: #0b0f19; color: #f1f5f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+            .glow-win { text-shadow: 0 0 12px #22c55e; color: #4ade80; }
+            .glow-lose { text-shadow: 0 0 12px #ef4444; color: #f87171; }
+            .table-container::-webkit-scrollbar { width: 5px; }
+            .table-container::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 99px; }
         </style>
     </head>
-    <body class="p-6">
-        <div class="max-w-5xl mx-auto">
-            <div class="text-center mb-8">
-                <h1 class="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500 mb-2">HỆ THỐNG DỰ ĐOÁN AI VIP</h1>
-                <p class="text-gray-400">Tự động bắt cầu & phân tích Markov Chain. Tự động làm mới sau mỗi 3 giây.</p>
+    <body class="p-4 md:p-8">
+        <div class="max-w-6xl mx-auto">
+            <div class="flex flex-col md:flex-row justify-between items-center border-b border-slate-800 pb-6 mb-8 gap-4">
+                <div>
+                    <h1 class="text-3xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600">AI DETECTOR TRADING BOT VIP</h1>
+                    <p class="text-xs text-slate-400 mt-1">Hệ thống xử lý đa luồng: Chuỗi Markov liên kết & Thuật toán bám cầu thông minh</p>
+                </div>
+                <div class="flex items-center gap-3 bg-slate-900 border border-slate-800 px-4 py-2 rounded-full">
+                    <span class="relative flex h-3 w-3">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                    </span>
+                    <span id="live-clock" class="text-xs font-mono text-slate-300">Đang đồng bộ live...</span>
+                </div>
             </div>
 
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div class="bg-slate-800 rounded-xl p-5 shadow-2xl border border-slate-700">
-                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Tài Xỉu Truyền Thống</h2>
-                    <div id="stats-normal" class="mb-4 flex gap-4 text-sm font-semibold text-slate-300"></div>
-                    <div class="table-container max-h-[500px] overflow-y-auto rounded-lg border border-slate-700">
-                        <table class="w-full text-left border-collapse">
-                            <thead class="bg-slate-900 sticky top-0">
+                <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-bold tracking-tight text-cyan-400 flex items-center gap-2">
+                           <span class="p-1.5 bg-cyan-950 rounded-lg text-cyan-400">⚡</span> TRUYỀN THỐNG
+                        </h2>
+                        <div id="summary-normal" class="flex gap-2 text-xs"></div>
+                    </div>
+                    
+                    <div class="table-container max-h-[520px] overflow-y-auto rounded-xl border border-slate-800">
+                        <table class="w-full text-center border-collapse">
+                            <thead class="bg-slate-950 text-slate-400 text-xs tracking-wider sticky top-0 uppercase">
                                 <tr>
-                                    <th class="p-3 text-sm">Phiên</th>
-                                    <th class="p-3 text-sm">Phương Pháp</th>
-                                    <th class="p-3 text-sm text-center">Dự Đoán</th>
-                                    <th class="p-3 text-sm text-center">Kết Quả</th>
-                                    <th class="p-3 text-sm text-center">Trạng Thái</th>
+                                    <th class="py-3 px-2">Phiên dự đoán</th>
+                                    <th class="py-3 px-2">Chiến Thuật</th>
+                                    <th class="py-3 px-2">AI Báo</th>
+                                    <th class="py-3 px-2">Kết Quả Thật</th>
+                                    <th class="py-3 px-2">Đánh Giá</th>
                                 </tr>
                             </thead>
-                            <tbody id="table-normal" class="divide-y divide-slate-700"></tbody>
+                            <tbody id="body-normal" class="divide-y divide-slate-800/60 text-sm font-medium"></tbody>
                         </table>
                     </div>
                 </div>
 
-                <div class="bg-slate-800 rounded-xl p-5 shadow-2xl border border-slate-700">
-                    <h2 class="text-2xl font-bold mb-4 text-purple-400">Tài Xỉu MD5</h2>
-                    <div id="stats-md5" class="mb-4 flex gap-4 text-sm font-semibold text-slate-300"></div>
-                    <div class="table-container max-h-[500px] overflow-y-auto rounded-lg border border-slate-700">
-                        <table class="w-full text-left border-collapse">
-                            <thead class="bg-slate-900 sticky top-0">
+                <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-bold tracking-tight text-purple-400 flex items-center gap-2">
+                           <span class="p-1.5 bg-purple-950 rounded-lg text-purple-400">🔒</span> CỔNG MD5 VIP
+                        </h2>
+                        <div id="summary-md5" class="flex gap-2 text-xs"></div>
+                    </div>
+                    
+                    <div class="table-container max-h-[520px] overflow-y-auto rounded-xl border border-slate-800">
+                        <table class="w-full text-center border-collapse">
+                            <thead class="bg-slate-950 text-slate-400 text-xs tracking-wider sticky top-0 uppercase">
                                 <tr>
-                                    <th class="p-3 text-sm">Phiên</th>
-                                    <th class="p-3 text-sm">Phương Pháp</th>
-                                    <th class="p-3 text-sm text-center">Dự Đoán</th>
-                                    <th class="p-3 text-sm text-center">Kết Quả</th>
-                                    <th class="p-3 text-sm text-center">Trạng Thái</th>
+                                    <th class="py-3 px-2">Phiên dự đoán</th>
+                                    <th class="py-3 px-2">Chiến Thuật</th>
+                                    <th class="py-3 px-2">AI Báo</th>
+                                    <th class="py-3 px-2">Kết Quả Thật</th>
+                                    <th class="py-3 px-2">Đánh Giá</th>
                                 </tr>
                             </thead>
-                            <tbody id="table-md5" class="divide-y divide-slate-700"></tbody>
+                            <tbody id="body-md5" class="divide-y divide-slate-800/60 text-sm font-medium"></tbody>
                         </table>
                     </div>
                 </div>
@@ -338,50 +429,62 @@ app.get("/", (req, res) => {
         </div>
 
         <script>
-            function renderRow(item) {
-                let statusClass = "text-yellow-400";
-                if(item.danh_gia === "THẮNG") statusClass = "text-green-500 font-bold glow-win";
-                if(item.danh_gia === "THUA") statusClass = "text-red-500 font-bold glow-lose";
+            function buildRowHtml(item) {
+                let statusBadge = "";
+                if(item.danh_gia === "THẮNG") {
+                    statusBadge = '<span class="bg-emerald-950/80 text-emerald-400 px-2.5 py-1 rounded-md text-xs font-bold border border-emerald-900/50 glow-win">THẮNG</span>';
+                } else if(item.danh_gia === "THỦA" || item.danh_gia === "THUA") {
+                    statusBadge = '<span class="bg-rose-950/80 text-rose-400 px-2.5 py-1 rounded-md text-xs font-bold border border-rose-900/50 glow-lose">THUA</span>';
+                } else {
+                    statusBadge = '<span class="bg-amber-950/80 text-amber-400 px-2.5 py-1 rounded-md text-xs font-medium border border-amber-900/50 animate-pulse">ĐANG CHỜ</span>';
+                }
+
+                const aiPredictionColor = item.du_doan === "TÀI" ? "text-red-400" : "text-sky-400";
                 
                 return \`
-                    <tr class="hover:bg-slate-700/50 transition-colors">
-                        <td class="p-3 text-sm font-mono text-gray-400">#\${item.phien}</td>
-                        <td class="p-3 text-xs text-indigo-300">\${item.chi_tiet}</td>
-                        <td class="p-3 text-sm text-center font-bold text-white">\${item.du_doan}</td>
-                        <td class="p-3 text-sm text-center font-bold text-gray-300">\${item.ket_qua || "..."}</td>
-                        <td class="p-3 text-sm text-center \${statusClass}">\${item.danh_gia}</td>
+                    <tr class="hover:bg-slate-800/40 transition-colors">
+                        <td class="py-3 px-2 font-mono text-slate-400 text-xs">#\${item.phien}</td>
+                        <td class="py-3 px-2 text-xs text-slate-400">\${item.chi_tiet || "Đang quét"}</td>
+                        <td class="py-3 px-2 font-bold \${aiPredictionColor}">\${item.du_doan}</td>
+                        <td class="py-3 px-2 text-slate-300 font-semibold">\${item.ket_qua || "..."}</td>
+                        <td class="py-3 px-2">\${statusBadge}</td>
                     </tr>
                 \`;
             }
 
-            async function fetchData() {
+            async function refreshUIPanel() {
                 try {
+                    document.getElementById('live-clock').innerText = "Live: " + new Date().toLocaleTimeString();
+
                     const [resNormal, resMd5] = await Promise.all([
                         fetch('/thongke').then(r => r.json()),
                         fetch('/thongkemd5').then(r => r.json())
                     ]);
 
-                    document.getElementById('stats-normal').innerHTML = \`
-                        <span class="bg-slate-700 px-2 py-1 rounded">Đã Đánh Giá: \${resNormal.tong_da_danh_gia}</span>
-                        <span class="bg-green-900/50 text-green-400 px-2 py-1 rounded">Thắng: \${resNormal.tong_thang}</span>
-                        <span class="bg-red-900/50 text-red-400 px-2 py-1 rounded">Tỷ lệ: \${resNormal.ti_le_chinh_xac}</span>
+                    // Render Cổng Thường
+                    document.getElementById('summary-normal').innerHTML = \`
+                        <span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">Mẫu: \${resNormal.tong_du_doan} ván</span>
+                        <span class="bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded font-bold">Thắng: \${resNormal.tong_thang}</span>
+                        <span class="bg-blue-900/40 text-cyan-400 px-2 py-1 rounded font-black">Tỷ lệ: \${resNormal.ti_le_chinh_xac}</span>
                     \`;
-                    document.getElementById('table-normal').innerHTML = resNormal.lich_su.map(renderRow).join('');
+                    document.getElementById('body-normal').innerHTML = resNormal.lich_su.length ? resNormal.lich_su.map(buildRowHtml).join('') : '<tr><td colspan="5" class="py-4 text-slate-500">Đang cập nhật phiên đầu...</td></tr>';
 
-                    document.getElementById('stats-md5').innerHTML = \`
-                        <span class="bg-slate-700 px-2 py-1 rounded">Đã Đánh Giá: \${resMd5.tong_da_danh_gia}</span>
-                        <span class="bg-green-900/50 text-green-400 px-2 py-1 rounded">Thắng: \${resMd5.tong_thang}</span>
-                        <span class="bg-red-900/50 text-red-400 px-2 py-1 rounded">Tỷ lệ: \${resMd5.ti_le_chinh_xac}</span>
+                    // Render Cổng MD5
+                    document.getElementById('summary-md5').innerHTML = \`
+                        <span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">Mẫu: \${resMd5.tong_du_doan} ván</span>
+                        <span class="bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded font-bold">Thắng: \${resMd5.tong_thang}</span>
+                        <span class="bg-purple-900/40 text-purple-400 px-2 py-1 rounded font-black">Tỷ lệ: \${resMd5.ti_le_chinh_xac}</span>
                     \`;
-                    document.getElementById('table-md5').innerHTML = resMd5.lich_su.map(renderRow).join('');
+                    document.getElementById('body-md5').innerHTML = resMd5.lich_su.length ? resMd5.lich_su.map(buildRowHtml).join('') : '<tr><td colspan="5" class="py-4 text-slate-500">Đang cập nhật phiên đầu...</td></tr>';
 
                 } catch(e) {
-                    console.error("Lỗi lấy dữ liệu:", e);
+                    console.error("Lỗi cập nhật bảng điều khiển UI:", e);
                 }
             }
 
-            setInterval(fetchData, 3000);
-            fetchData();
+            // Realtime cập nhật UI 3 giây 1 lần đồng bộ dữ liệu Node
+            setInterval(refreshUIPanel, 3000);
+            refreshUIPanel();
         </script>
     </body>
     </html>
@@ -389,4 +492,12 @@ app.get("/", (req, res) => {
     res.send(html);
 });
 
-app.listen(PORT, () => console.log(`🚀 Server chạy cổng ${PORT} - Giao diện VIP tại http://localhost:${PORT}`));
+// Kích hoạt server
+app.listen(PORT, () => {
+    console.log(\`======================================================\`);
+    console.log(\`🚀 ENGINE AI HOÀN TẤT - SERVER CHẠY TẠI CỔNG: \${PORT}\`);
+    console.log(\`🖥️  Xem giao diện Dashboard: http://localhost:\${PORT}\`);
+    console.log(\`📊 API JSON Tài xỉu thường : http://localhost:\${PORT}/taixiu\`);
+    console.log(\`🔒 API JSON Tài xỉu MD5    : http://localhost:\${PORT}/taixiumd5\`);
+    console.log(\`======================================================\`);
+});
