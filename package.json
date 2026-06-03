@@ -1,20 +1,22 @@
 {
-  "name": "super-markov-taixiu-vip",
-  "version": "2.0.0",
-  "description": "AI dự đoán Tài Xỉu siêu chuẩn bằng Markov Chain bậc cao + auto ping keep-alive",
+  "name": "bot-ai-vip-taixiu",
+  "version": "1.0.0",
+  "description": "Hệ thống dự đoán AI VIP Tài Xỉu kết hợp Markov Chain và Nhận diện Cầu",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
+  "keywords": [
+    "taixiu",
+    "bot",
+    "ai",
+    "markov-chain"
+  ],
+  "author": "VIP Developer",
+  "license": "ISC",
   "dependencies": {
-    "axios": "^1.7.2",
-    "express": "^4.19.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "keywords": ["taixiu", "markov", "ai", "prediction", "super-markov"],
-  "author": "YourName",
-  "license": "MIT"
+    "axios": "^1.7.9",
+    "express": "^4.21.2"
+  }
 }
