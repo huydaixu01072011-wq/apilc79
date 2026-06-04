@@ -493,11 +493,14 @@ app.get("/", (req, res) => {
 });
 
 // Kích hoạt server
+// Khởi động server
 app.listen(PORT, () => {
-    console.log(\`======================================================\`);
-    console.log(\`🚀 ENGINE AI HOÀN TẤT - SERVER CHẠY TẠI CỔNG: \${PORT}\`);
-    console.log(\`🖥️  Xem giao diện Dashboard: http://localhost:\${PORT}\`);
-    console.log(\`📊 API JSON Tài xỉu thường : http://localhost:\${PORT}/taixiu\`);
-    console.log(\`🔒 API JSON Tài xỉu MD5    : http://localhost:\${PORT}/taixiumd5\`);
-    console.log(\`======================================================\`);
+    console.log("======================================================");
+    console.log(`🚀 ENGINE AI HOÀN TẤT - SERVER CHẠY TẠI CỔNG: ${PORT}`);
+    console.log(`🖥️  Dashboard: http://localhost:${PORT}`);
+    console.log(`📊 API JSON Tài Xỉu: http://localhost:${PORT}/taixiu`);
+    console.log(`🔒 API JSON MD5: http://localhost:${PORT}/taixiumd5`);
+    console.log(`📈 Thống kê: http://localhost:${PORT}/thongke`);
+    console.log(`📈 Thống kê MD5: http://localhost:${PORT}/thongkemd5`);
+    console.log("======================================================");
 });
