@@ -22,55 +22,64 @@ let historyMd5 = [];
 let predictionsNormal = [];
 let predictionsMd5 = [];
 
-// ========== VIP BRAIN ENGINE ==========
-class VIPBrain {
-    constructor(maxOrder = 4) {
-        this.maxOrder = maxOrder;
-        this.transitionMatrices = {};
-        this.diceHistory = [];
+// =================== MEGAVIP BRAIN ULTRA v4.0 ===================
+class MegaVIPBrainUltra {
+    constructor() {
         this.txHistory = [];
-        this.maxHistory = 80;
-        this.bayesian = { TAI: 0.5, XIU: 0.5 };
+        this.diceHistory = [];
+        this.maxMarkovOrder = 7;
+        this.transitionMatrices = {};
+        this.patternLibrary = this.buildPatternLibrary();
+        this.metaMemory = [];
+        this.maxMetaMemory = 60;
+        this.weights = {
+            markov: 0.22,
+            pattern: 0.28,
+            cycle: 0.18,
+            break: 0.12,
+            trend: 0.12,
+            volatility: 0.08
+        };
+        this.lastUpdateTime = Date.now();
+        this.consecutiveLosses = 0;
+        this.lastComponentProbs = null;
     }
 
     static diceCategory(diem) {
-        if (diem === 1 || diem === 2) return 1;
-        if (diem === 3 || diem === 4) return 2;
+        if (diem <= 2) return 1;
+        if (diem <= 4) return 2;
         return 3;
     }
 
     loadData(rawList) {
         if (!rawList || rawList.length === 0) return;
         const clone = [...rawList].reverse();
-        this.txHistory = clone.map(item => {
-            if (!item.dices || item.dices.length !== 3) return null;
-            const sum = item.dices.reduce((a, b) => a + b, 0);
-            return sum >= 11 ? "TÀI" : "XỈU";
-        }).filter(Boolean);
+        this.txHistory = [];
         this.diceHistory = [];
         clone.forEach(item => {
-            if (item.dices && item.dices.length === 3) {
-                item.dices.forEach(d => this.diceHistory.push(VIPBrain.diceCategory(d)));
-            }
+            if (!item.dices || item.dices.length !== 3) return;
+            const sum = item.dices.reduce((a,b) => a+b, 0);
+            this.txHistory.push(sum >= 11 ? "TÀI" : "XỈU");
+            item.dices.forEach(d => this.diceHistory.push(MegaVIPBrainUltra.diceCategory(d)));
         });
-        if (this.diceHistory.length > this.maxHistory) {
-            this.diceHistory = this.diceHistory.slice(-this.maxHistory);
+        const maxLen = 150;
+        if (this.txHistory.length > maxLen) {
+            this.txHistory = this.txHistory.slice(-maxLen);
+            this.diceHistory = this.diceHistory.slice(-maxLen * 3);
         }
-        this._buildTransitionMatrices();
-        this._updateBayesian();
+        this.buildMarkovMatrices();
+        this.updateMetaWeights();
     }
 
-    _buildTransitionMatrices() {
+    buildMarkovMatrices() {
         this.transitionMatrices = {};
         const len = this.diceHistory.length;
-        for (let order = 1; order <= this.maxOrder; order++) {
+        for (let order = 1; order <= this.maxMarkovOrder; order++) {
             const matrix = new Map();
             if (len > order) {
                 for (let i = order; i < len; i++) {
                     const state = [];
-                    for (let j = order - 1; j >= 0; j--) {
-                        state.push(this.diceHistory[i - j]);
-                    }
+                    for (let j = order-1; j >= 0; j--) state.push(this.diceHistory[i - j]);
                     const key = state.join(',');
                     const nextVal = this.diceHistory[i];
                     if (!matrix.has(key)) matrix.set(key, new Map());
@@ -82,222 +91,269 @@ class VIPBrain {
         }
     }
 
-    _updateBayesian() {
-        const recent = this.txHistory.slice(-30);
-        const countTai = recent.filter(r => r === "TÀI").length;
-        const countXiu = recent.length - countTai;
-        const alpha = 1;
-        this.bayesian.TAI = (countTai + alpha) / (recent.length + 2 * alpha);
-        this.bayesian.XIU = (countXiu + alpha) / (recent.length + 2 * alpha);
-    }
-
-    _predictMarkov() {
+    predictMarkovProb() {
         const len = this.diceHistory.length;
-        if (len < 1) return { category: 2, confidence: 0.5 };
-        for (let order = this.maxOrder; order >= 1; order--) {
+        if (len < 1) return 0.5;
+        for (let order = this.maxMarkovOrder; order >= 1; order--) {
             if (len < order) continue;
             const state = [];
-            for (let j = order - 1; j >= 0; j--) {
-                state.push(this.diceHistory[len - 1 - j]);
-            }
+            for (let j = order-1; j >= 0; j--) state.push(this.diceHistory[len - 1 - j]);
             const key = state.join(',');
             const matrix = this.transitionMatrices[order];
             if (matrix && matrix.has(key)) {
                 const nextCounts = matrix.get(key);
                 let total = 0;
-                for (let count of nextCounts.values()) total += count;
-                let bestCat = 2, bestProb = 0;
-                for (let [cat, cnt] of nextCounts.entries()) {
-                    const prob = cnt / total;
-                    if (prob > bestProb) { bestProb = prob; bestCat = cat; }
-                }
-                return { category: bestCat, confidence: bestProb };
+                for (let cnt of nextCounts.values()) total += cnt;
+                let probCat3 = (nextCounts.get(3) || 0) / total;
+                let probTai = probCat3 * 0.72 + (nextCounts.get(2)||0)/total * 0.52 + (nextCounts.get(1)||0)/total * 0.28;
+                return Math.min(0.95, Math.max(0.05, probTai));
             }
         }
-        const counts = { 1: 0, 2: 0, 3: 0 };
+        const counts = {1:0,2:0,3:0};
         this.diceHistory.forEach(c => counts[c]++);
         const total = this.diceHistory.length;
-        let bestCat = 2, bestProb = 0;
-        for (let c of [1, 2, 3]) {
-            const p = counts[c] / total;
-            if (p > bestProb) { bestProb = p; bestCat = c; }
-        }
-        return { category: bestCat, confidence: bestProb };
+        let probTai = (counts[3]/total)*0.7 + (counts[2]/total)*0.5 + (counts[1]/total)*0.3;
+        return 0.3 + probTai * 0.4;
     }
 
-    _detectPattern() {
+    buildPatternLibrary() {
+        return [
+            { name: "BỆT TÀI 5", seq: ["TÀI","TÀI","TÀI","TÀI","TÀI"], next: "TÀI", conf: 94 },
+            { name: "BỆT XỈU 5", seq: ["XỈU","XỈU","XỈU","XỈU","XỈU"], next: "XỈU", conf: 94 },
+            { name: "1-1-1 TÀI", seq: ["XỈU","TÀI","XỈU","TÀI","XỈU","TÀI"], next: "XỈU", conf: 88 },
+            { name: "1-1-1 XỈU", seq: ["TÀI","XỈU","TÀI","XỈU","TÀI","XỈU"], next: "TÀI", conf: 88 },
+            { name: "2-2-2 TÀI", seq: ["TÀI","TÀI","XỈU","XỈU","TÀI","TÀI","XỈU"], next: "TÀI", conf: 85 },
+            { name: "2-2-2 XỈU", seq: ["XỈU","XỈU","TÀI","TÀI","XỈU","XỈU","TÀI"], next: "XỈU", conf: 85 },
+            { name: "3-1-2 TÀI", seq: ["TÀI","TÀI","TÀI","XỈU","XỈU","XỈU","TÀI"], next: "TÀI", conf: 82 },
+            { name: "3-1-2 XỈU", seq: ["XỈU","XỈU","XỈU","TÀI","TÀI","TÀI","XỈU"], next: "XỈU", conf: 82 },
+            { name: "LC79 DUAL", seq: ["TÀI","XỈU","TÀI","TÀI","XỈU","XỈU","TÀI","XỈU","TÀI"], next: "TÀI", conf: 90 },
+            { name: "LC79 REV", seq: ["XỈU","TÀI","XỈU","XỈU","TÀI","TÀI","XỈU","TÀI","XỈU"], next: "XỈU", conf: 90 },
+            { name: "HARMONIC 3", seq: ["TÀI","XỈU","XỈU","TÀI","TÀI","XỈU","TÀI","XỈU","XỈU"], next: "TÀI", conf: 86 },
+            { name: "HARMONIC 3R", seq: ["XỈU","TÀI","TÀI","XỈU","XỈU","TÀI","XỈU","TÀI","TÀI"], next: "XỈU", conf: 86 },
+            { name: "BẺ 4 TÀI", seq: ["TÀI","TÀI","TÀI","TÀI","XỈU"], next: "XỈU", conf: 91, break: true },
+            { name: "BẺ 4 XỈU", seq: ["XỈU","XỈU","XỈU","XỈU","TÀI"], next: "TÀI", conf: 91, break: true },
+            { name: "BẺ 5 TÀI", seq: ["TÀI","TÀI","TÀI","TÀI","TÀI","XỈU"], next: "XỈU", conf: 95, break: true },
+            { name: "BẺ 5 XỈU", seq: ["XỈU","XỈU","XỈU","XỈU","XỈU","TÀI"], next: "TÀI", conf: 95, break: true },
+            { name: "XEN KẸP", seq: ["TÀI","XỈU","TÀI","XỈU","TÀI","XỈU","TÀI"], next: "TÀI", conf: 83 },
+            { name: "XEN KẸP X", seq: ["XỈU","TÀI","XỈU","TÀI","XỈU","TÀI","XỈU"], next: "XỈU", conf: 83 },
+            { name: "CHUỖI TÀI 3", seq: ["TÀI","TÀI","TÀI"], next: "TÀI", conf: 78 },
+            { name: "CHUỖI XỈU 3", seq: ["XỈU","XỈU","XỈU"], next: "XỈU", conf: 78 },
+            { name: "ĐẢO 2 TÀI", seq: ["TÀI","XỈU","TÀI","TÀI","XỈU","TÀI"], next: "TÀI", conf: 81 },
+            { name: "ĐẢO 2 XỈU", seq: ["XỈU","TÀI","XỈU","XỈU","TÀI","XỈU"], next: "XỈU", conf: 81 },
+        ];
+    }
+
+    detectPattern() {
         const tx = this.txHistory;
         const len = tx.length;
-        if (len < 6) return null;
-        const last = tx.slice(-6);
-        const match = (pattern) => {
-            if (pattern.length > last.length) return false;
-            for (let i = 0; i < pattern.length; i++) {
-                if (last[last.length - pattern.length + i] !== pattern[i]) return false;
+        if (len < 3) return null;
+        const last = tx.slice(-12);
+        for (let p of this.patternLibrary) {
+            if (p.seq.length > last.length) continue;
+            let match = true;
+            for (let i = 0; i < p.seq.length; i++) {
+                if (last[last.length - p.seq.length + i] !== p.seq[i]) {
+                    match = false;
+                    break;
+                }
             }
-            return true;
-        };
-        const patterns = [
-            { name: "BỆT TÀI", seq: ["TÀI","TÀI","TÀI","TÀI"], next: "TÀI", confidence: 90 },
-            { name: "BỆT XỈU", seq: ["XỈU","XỈU","XỈU","XỈU"], next: "XỈU", confidence: 90 },
-            { name: "1-1 TÀI", seq: ["XỈU","TÀI","XỈU","TÀI"], next: "XỈU", confidence: 85 },
-            { name: "1-1 XỈU", seq: ["TÀI","XỈU","TÀI","XỈU"], next: "TÀI", confidence: 85 },
-            { name: "2-2 TÀI", seq: ["TÀI","TÀI","XỈU","XỈU","TÀI"], next: "TÀI", confidence: 82 },
-            { name: "2-2 XỈU", seq: ["XỈU","XỈU","TÀI","TÀI","XỈU"], next: "XỈU", confidence: 82 },
-            { name: "3-1 TÀI", seq: ["TÀI","TÀI","TÀI","XỈU"], next: "TÀI", confidence: 80 },
-            { name: "3-1 XỈU", seq: ["XỈU","XỈU","XỈU","TÀI"], next: "XỈU", confidence: 80 },
-            { name: "CẦU ĐẢO 2-1", seq: ["TÀI","TÀI","XỈU","TÀI","XỈU"], next: "TÀI", confidence: 78 },
-            { name: "CẦU ĐẢO 2-1 (ngược)", seq: ["XỈU","XỈU","TÀI","XỈU","TÀI"], next: "XỈU", confidence: 78 },
-        ];
-        for (let p of patterns) {
-            if (match(p.seq)) return { name: p.name, prediction: p.next, confidence: p.confidence };
+            if (match) return p;
         }
         return null;
     }
 
-    // ========== NHẬN DIỆN BẺ CẦU ==========
-    _detectBreak() {
-        const tx = this.txHistory;
-        const len = tx.length;
-        if (len < 5) return null;
-
-        const last6 = tx.slice(-6); // 6 phiên gần nhất
-
-        // Kiểm tra bệt bị bẻ: 3 hoặc 4 phiên giống nhau rồi phiên cuối khác
-        const isBệtBreak = (arr, value) => {
-            if (arr.length < 4) return false;
-            const last = arr[arr.length - 1];
-            if (last === value) return false; // phiên cuối vẫn giống -> chưa bẻ
-            const prev = arr.slice(0, -1);
-            return prev.every(v => v === value) && prev.length >= 3; // ít nhất 3 phiên giống
-        };
-
-        if (isBệtBreak(last6, "TÀI")) {
-            return { isBreak: true, prediction: "XỈU", confidence: 88, name: "BẺ BỆT TÀI" };
-        }
-        if (isBệtBreak(last6, "XỈU")) {
-            return { isBreak: true, prediction: "TÀI", confidence: 88, name: "BẺ BỆT XỈU" };
-        }
-
-        // Kiểm tra cầu 1-1 bị bẻ: mẫu T-X-T-X nhưng phiên cuối đi cùng hướng với áp cuối
-        const check11Break = (arr, startWith) => {
-            if (arr.length < 5) return false;
-            const expect = startWith === "TÀI" ? ["TÀI","XỈU","TÀI","XỈU","TÀI"] : ["XỈU","TÀI","XỈU","TÀI","XỈU"];
-            for (let i = 0; i < 5; i++) {
-                if (i < 4 && arr[arr.length - 5 + i] !== expect[i]) return false;
-            }
-            // Phiên thứ 5 (cuối cùng) lẽ ra phải là expect[4] nhưng thực tế là arr[arr.length-1]
-            const actualLast = arr[arr.length - 1];
-            return actualLast === expect[3]; // trùng với áp cuối -> bẻ
-        };
-
-        if (check11Break(last6, "TÀI")) {
-            return { isBreak: true, prediction: "TÀI", confidence: 82, name: "BẺ CẦU 1-1 (TÀI)" };
-        }
-        if (check11Break(last6, "XỈU")) {
-            return { isBreak: true, prediction: "XỈU", confidence: 82, name: "BẺ CẦU 1-1 (XỈU)" };
-        }
-
-        return null; // không có dấu hiệu bẻ rõ ràng
+    patternProbTai() {
+        const pat = this.detectPattern();
+        if (!pat) return 0.5;
+        let prob = pat.next === "TÀI" ? pat.conf/100 : 1 - pat.conf/100;
+        if (pat.break) prob = prob * 1.2;
+        return Math.min(0.98, Math.max(0.02, prob));
     }
 
-    _trendAnalysis() {
-        const recent = this.txHistory.slice(-20);
-        if (recent.length < 10) return { trend: "SIDEWAY", strength: 0 };
+    detectCycle() {
+        const tx = this.txHistory;
+        const len = tx.length;
+        if (len < 8) return null;
+        for (let period = 2; period <= 12; period++) {
+            if (len < period * 2) continue;
+            const lastCycle = tx.slice(-period);
+            const prevCycle = tx.slice(-2*period, -period);
+            let matches = 0;
+            for (let i=0; i<period; i++) if (lastCycle[i] === prevCycle[i]) matches++;
+            if (matches / period > 0.85) {
+                let confidence = 70 + (matches/period)*20;
+                return { period, prediction: lastCycle[0], confidence };
+            }
+        }
+        return null;
+    }
+
+    cycleProbTai() {
+        const cycle = this.detectCycle();
+        if (!cycle) return 0.5;
+        return cycle.prediction === "TÀI" ? cycle.confidence/100 : 1 - cycle.confidence/100;
+    }
+
+    detectBreak() {
+        const tx = this.txHistory;
+        const len = tx.length;
+        if (len < 6) return null;
+        const recent = tx.slice(-12);
+        let streak = 1;
+        for (let i=recent.length-2; i>=0; i--) {
+            if (recent[i] === recent[recent.length-1]) streak++;
+            else break;
+        }
+        if (streak >= 4) {
+            const predicted = recent[recent.length-1] === "TÀI" ? "XỈU" : "TÀI";
+            const confidence = Math.min(94, 70 + streak * 5);
+            return { prediction: predicted, confidence, name: `BẺ BỆT ${streak}` };
+        }
+        let changes = 0;
+        for (let i=1; i<recent.length; i++) if (recent[i] !== recent[i-1]) changes++;
+        const volatility = changes / (recent.length-1);
+        if (volatility > 0.7 && len > 10) {
+            const last = recent[recent.length-1];
+            return { prediction: last, confidence: 76, name: "BÙNG NỔ ĐẢO CHIỀU" };
+        }
+        return null;
+    }
+
+    breakProbTai() {
+        const brk = this.detectBreak();
+        if (!brk) return 0.5;
+        return brk.prediction === "TÀI" ? brk.confidence/100 : 1 - brk.confidence/100;
+    }
+
+    trendProbTai() {
+        const recent = this.txHistory.slice(-30);
+        if (recent.length < 10) return 0.5;
         const taiCount = recent.filter(r => r === "TÀI").length;
         const ratio = taiCount / recent.length;
-        const ema = ratio * 0.3 + 0.5 * 0.7; // EMA cố định alpha=0.3
-        if (ema > 0.55) return { trend: "TÀI", strength: (ema - 0.5) * 2 };
-        if (ema < 0.45) return { trend: "XỈU", strength: (0.5 - ema) * 2 };
-        return { trend: "SIDEWAY", strength: 1 - Math.abs(ema - 0.5) * 2 };
+        const ema = ratio * 0.3 + 0.5 * 0.7;
+        return 0.3 + ema * 0.4;
+    }
+
+    volatilityProbTai() {
+        const recent = this.txHistory.slice(-20);
+        if (recent.length < 5) return 0.5;
+        let changes = 0;
+        for (let i=1; i<recent.length; i++) if (recent[i] !== recent[i-1]) changes++;
+        const vol = changes / (recent.length-1);
+        if (vol > 0.6) {
+            const last = recent[recent.length-1];
+            const predicted = last === "TÀI" ? "XỈU" : "TÀI";
+            return predicted === "TÀI" ? 0.65 : 0.35;
+        }
+        return 0.5;
+    }
+
+    updateMetaWeights() {
+        if (this.txHistory.length < 15) return;
+        if (Date.now() - this.lastUpdateTime < 30000) return;
+        this.lastUpdateTime = Date.now();
+        if (this.metaMemory.length < 10) return;
+
+        let componentAccuracy = { markov:0, pattern:0, cycle:0, break:0, trend:0, volatility:0 };
+        let count = 0;
+        for (let mem of this.metaMemory) {
+            if (!mem.actual) continue;
+            const actualTai = mem.actual === "TÀI" ? 1 : 0;
+            for (let key in componentAccuracy) {
+                const predProb = mem.componentProbs[key];
+                if (predProb !== undefined) {
+                    const pred = predProb >= 0.5 ? 1 : 0;
+                    if (pred === actualTai) componentAccuracy[key] = (componentAccuracy[key] || 0) + 1;
+                }
+            }
+            count++;
+        }
+        if (count === 0) return;
+        const alpha = 0.35;
+        let totalNew = 0;
+        let newWeights = {};
+        for (let key in this.weights) {
+            let acc = (componentAccuracy[key] || 0) / count;
+            acc = Math.min(0.95, Math.max(0.05, acc));
+            newWeights[key] = acc;
+            totalNew += acc;
+        }
+        if (totalNew > 0) {
+            for (let key in newWeights) {
+                newWeights[key] /= totalNew;
+                this.weights[key] = this.weights[key] * (1 - alpha) + newWeights[key] * alpha;
+            }
+        }
+        let sum = 0;
+        for (let key in this.weights) sum += this.weights[key];
+        for (let key in this.weights) this.weights[key] /= sum;
     }
 
     analyze() {
-        const markov = this._predictMarkov();
-        let probTai_Markov = 0.5;
-        if (markov.category === 3) probTai_Markov = 0.7;
-        else if (markov.category === 1) probTai_Markov = 0.3;
+        const probMarkov = this.predictMarkovProb();
+        const probPattern = this.patternProbTai();
+        const probCycle = this.cycleProbTai();
+        let probBreak = this.breakProbTai();
+        const probTrend = this.trendProbTai();
+        const probVol = this.volatilityProbTai();
 
-        const pattern = this._detectPattern();
-        let probTai_Pattern = 0.5;
-        let patternName = "KHÔNG CẦU";
-        if (pattern) {
-            probTai_Pattern = pattern.prediction === "TÀI" ? pattern.confidence / 100 : 1 - pattern.confidence / 100;
-            patternName = pattern.name;
-        }
+        if (this.consecutiveLosses >= 2) probBreak = Math.min(0.98, probBreak * (1 + this.consecutiveLosses * 0.1));
 
-        const breakInfo = this._detectBreak();
-        let probTai_Break = 0.5;
-        let breakName = "KHÔNG BẺ";
-        if (breakInfo && breakInfo.isBreak) {
-            probTai_Break = breakInfo.prediction === "TÀI" ? breakInfo.confidence / 100 : 1 - breakInfo.confidence / 100;
-            breakName = breakInfo.name;
-        }
+        let finalProb = 
+            probMarkov * this.weights.markov +
+            probPattern * this.weights.pattern +
+            probCycle * this.weights.cycle +
+            probBreak * this.weights.break +
+            probTrend * this.weights.trend +
+            probVol * this.weights.volatility;
 
-        const trend = this._trendAnalysis();
-        let probTai_Trend = 0.5;
-        if (trend.trend === "TÀI") probTai_Trend = 0.5 + trend.strength * 0.5;
-        else if (trend.trend === "XỈU") probTai_Trend = 0.5 - trend.strength * 0.5;
+        finalProb = 1 / (1 + Math.exp(-12 * (finalProb - 0.5)));
+        finalProb = Math.min(0.97, Math.max(0.03, finalProb));
 
-        const probTai_Bayes = this.bayesian.TAI;
-
-        // Trọng số ensemble mới: Markov 30%, Pattern 25%, Bẻ cầu 25%, Trend 15%, Bayes 5%
-        const finalProbTai = probTai_Markov * 0.30 +
-                             probTai_Pattern * 0.25 +
-                             probTai_Break * 0.25 +
-                             probTai_Trend * 0.15 +
-                             probTai_Bayes * 0.05;
-
-        const prediction = finalProbTai >= 0.5 ? "TÀI" : "XỈU";
-        const confidenceTai = Math.round(finalProbTai * 100);
+        const prediction = finalProb >= 0.5 ? "TÀI" : "XỈU";
+        const confidenceTai = Math.round(finalProb * 100);
         const confidenceXiu = 100 - confidenceTai;
 
-        let reason = `Markov(${markov.category},${Math.round(markov.confidence*100)}%) `;
-        if (patternName !== "KHÔNG CẦU") reason += `+ ${patternName} `;
-        if (breakName !== "KHÔNG BẺ") reason += `+ ${breakName} `;
-        reason += `| Trend ${trend.trend} | Bayes T=${Math.round(probTai_Bayes*100)}%`;
-
-        return {
-            prediction,
-            confidenceTai,
-            confidenceXiu,
-            reason,
-            pattern: breakName !== "KHÔNG BẺ" ? breakName : patternName
+        this.lastComponentProbs = {
+            markov: probMarkov,
+            pattern: probPattern,
+            cycle: probCycle,
+            break: probBreak,
+            trend: probTrend,
+            volatility: probVol
         };
+
+        let patternName = "KHÔNG CẦU";
+        const pat = this.detectPattern();
+        if (pat) patternName = pat.name;
+        const brk = this.detectBreak();
+        if (brk && brk.name) patternName = brk.name;
+
+        let reason = `M${Math.round(probMarkov*100)}% P${Math.round(probPattern*100)}% C${Math.round(probCycle*100)}% B${Math.round(probBreak*100)}% T${Math.round(probTrend*100)}% V${Math.round(probVol*100)}%`;
+        return { prediction, confidenceTai, confidenceXiu, reason, pattern: patternName };
+    }
+
+    recordResult(actual) {
+        if (this.lastComponentProbs) {
+            this.metaMemory.push({ actual, componentProbs: { ...this.lastComponentProbs }, timestamp: Date.now() });
+            if (this.metaMemory.length > this.maxMetaMemory) this.metaMemory.shift();
+            const lastPred = this.lastComponentProbs.markov >= 0.5 ? "TÀI" : "XỈU";
+            if (lastPred !== actual) this.consecutiveLosses++;
+            else this.consecutiveLosses = 0;
+            this.lastComponentProbs = null;
+            this.updateMetaWeights();
+        }
     }
 }
 
-const brainNormal = new VIPBrain(4);
-const brainMd5 = new VIPBrain(4);
+// Khởi tạo hai bộ não
+const brainNormal = new MegaVIPBrainUltra();
+const brainMd5 = new MegaVIPBrainUltra();
 
-// ========== CẬP NHẬT DỮ LIỆU ==========
+// Helper functions
 function feedBrain(brain, rawList) {
     if (rawList && rawList.length > 0) brain.loadData(rawList);
 }
-
-async function poll() {
-    try {
-        const [normal, md5] = await Promise.all([
-            http.get(URL_TRUYEN_THONG).catch(() => null),
-            http.get(URL_MD5).catch(() => null)
-        ]);
-        if (normal?.data?.list) {
-            historyNormal = normal.data.list;
-            feedBrain(brainNormal, historyNormal);
-            updatePredictionTable(predictionsNormal, historyNormal, brainNormal);
-            evaluatePredictions(predictionsNormal, historyNormal);
-        }
-        if (md5?.data?.list) {
-            historyMd5 = md5.data.list;
-            feedBrain(brainMd5, historyMd5);
-            updatePredictionTable(predictionsMd5, historyMd5, brainMd5);
-            evaluatePredictions(predictionsMd5, historyMd5);
-        }
-    } catch (e) {
-        console.log("Poll error:", e.message);
-    }
-}
-setInterval(poll, 3000);
 
 function updatePredictionTable(storage, history, brain) {
     if (!history || history.length === 0) return;
@@ -319,7 +375,7 @@ function updatePredictionTable(storage, history, brain) {
     }
 }
 
-function evaluatePredictions(storage, history) {
+function evaluatePredictions(storage, history, brain) {
     storage.forEach(p => {
         if (p.ket_qua && p.ket_qua !== "...") return;
         const real = history.find(h => h.id === p.phien);
@@ -328,6 +384,7 @@ function evaluatePredictions(storage, history) {
             const result = sum >= 11 ? "TÀI" : "XỈU";
             p.ket_qua = `${result} (${sum})`;
             p.danh_gia = (p.du_doan === result) ? "THẮNG" : "THUA";
+            brain.recordResult(result);
         }
     });
 }
@@ -347,7 +404,30 @@ function getStats(storage) {
     };
 }
 
-// Hàm tiện ích
+async function poll() {
+    try {
+        const [normal, md5] = await Promise.all([
+            http.get(URL_TRUYEN_THONG).catch(() => null),
+            http.get(URL_MD5).catch(() => null)
+        ]);
+        if (normal?.data?.list) {
+            historyNormal = normal.data.list;
+            feedBrain(brainNormal, historyNormal);
+            updatePredictionTable(predictionsNormal, historyNormal, brainNormal);
+            evaluatePredictions(predictionsNormal, historyNormal, brainNormal);
+        }
+        if (md5?.data?.list) {
+            historyMd5 = md5.data.list;
+            feedBrain(brainMd5, historyMd5);
+            updatePredictionTable(predictionsMd5, historyMd5, brainMd5);
+            evaluatePredictions(predictionsMd5, historyMd5, brainMd5);
+        }
+    } catch (e) {
+        console.log("Poll error:", e.message);
+    }
+}
+setInterval(poll, 3000);
+
 function generateSeed(history, count = 8) {
     if (history.length < count) return null;
     const seedString = history.slice(0, count).map(item => item.dices ? item.dices.join('') : '').join('');
@@ -381,13 +461,13 @@ function formatAIResponse(raw, brain) {
         ket_qua: sum >= 11 ? "TÀI" : "XỈU",
         phien_tiep_theo: data.id + 1,
         du_doan: ai.prediction,
-        do_tin_cay: { TÀI: `${ai.confidenceTai}%`, XỈU: `${ai.confidenceXiu}%` },
+        do_tin_cay: { TAI: `${ai.confidenceTai}%`, XIU: `${ai.confidenceXiu}%` },
         ly_do: ai.reason,
         pattern: ai.pattern
     };
 }
 
-// ========== ROUTES CHÍNH ==========
+// Express routes
 app.get("/taixiu", async (req, res) => {
     try {
         const r = await http.get(URL_TRUYEN_THONG);
@@ -419,195 +499,34 @@ app.get("/all", async (req, res) => {
 app.get("/thongke", (req, res) => res.json(getStats(predictionsNormal)));
 app.get("/thongkemd5", (req, res) => res.json(getStats(predictionsMd5)));
 
-// ========== ENDPOINT GIAO DIỆN DỰ ĐOÁN “SẠCH” ==========
-app.get("/dudoan/tx", async (req, res) => {
-    try {
-        const r = await http.get(URL_TRUYEN_THONG);
-        feedBrain(brainNormal, r.data.list);
-        const ai = brainNormal.analyze();
-        const data = r.data.list[0];
-        const nextPhien = data.id + 1;
-        const html = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dự Đoán Tài Xỉu Thường</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <meta http-equiv="refresh" content="5">
-</head>
-<body class="bg-gray-950 text-white flex items-center justify-center min-h-screen">
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl text-center max-w-md w-full">
-        <h2 class="text-2xl font-bold text-cyan-400 mb-2">🎲 DỰ ĐOÁN TÀI XỈU</h2>
-        <p class="text-slate-400 text-sm mb-6">Cổng Truyền Thống • Tự động cập nhật mỗi 5s</p>
-        <div class="bg-slate-800 rounded-xl p-6 mb-4">
-            <p class="text-lg text-slate-300">Phiên tiếp theo <span class="text-white font-mono">#${nextPhien}</span></p>
-            <p class="text-4xl font-black mt-3 ${ai.prediction === 'TÀI' ? 'text-red-400' : 'text-sky-400'}">${ai.prediction}</p>
-            <div class="flex justify-center gap-4 mt-2 text-sm">
-                <span class="text-red-400">Tài ${ai.confidenceTai}%</span>
-                <span class="text-sky-400">Xỉu ${ai.confidenceXiu}%</span>
-            </div>
-        </div>
-        <p class="text-xs text-slate-500">🧠 ${ai.reason}</p>
-        <p class="text-xs text-slate-600 mt-1">Pattern: ${ai.pattern}</p>
-    </div>
-</body>
-</html>`;
-        res.send(html);
-    } catch (e) {
-        res.status(500).send("Lỗi lấy dữ liệu dự đoán");
-    }
-});
-
-app.get("/dudoan/txmd5", async (req, res) => {
-    try {
-        const r = await http.get(URL_MD5);
-        feedBrain(brainMd5, r.data.list);
-        const ai = brainMd5.analyze();
-        const data = r.data.list[0];
-        const nextPhien = data.id + 1;
-        const html = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dự Đoán Tài Xỉu MD5</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <meta http-equiv="refresh" content="5">
-</head>
-<body class="bg-gray-950 text-white flex items-center justify-center min-h-screen">
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl text-center max-w-md w-full">
-        <h2 class="text-2xl font-bold text-purple-400 mb-2">🔒 DỰ ĐOÁN TÀI XỈU MD5</h2>
-        <p class="text-slate-400 text-sm mb-6">Cổng MD5 • Tự động cập nhật mỗi 5s</p>
-        <div class="bg-slate-800 rounded-xl p-6 mb-4">
-            <p class="text-lg text-slate-300">Phiên tiếp theo <span class="text-white font-mono">#${nextPhien}</span></p>
-            <p class="text-4xl font-black mt-3 ${ai.prediction === 'TÀI' ? 'text-red-400' : 'text-sky-400'}">${ai.prediction}</p>
-            <div class="flex justify-center gap-4 mt-2 text-sm">
-                <span class="text-red-400">Tài ${ai.confidenceTai}%</span>
-                <span class="text-sky-400">Xỉu ${ai.confidenceXiu}%</span>
-            </div>
-        </div>
-        <p class="text-xs text-slate-500">🧠 ${ai.reason}</p>
-        <p class="text-xs text-slate-600 mt-1">Pattern: ${ai.pattern}</p>
-    </div>
-</body>
-</html>`;
-        res.send(html);
-    } catch (e) {
-        res.status(500).send("Lỗi lấy dữ liệu dự đoán MD5");
-    }
-});
-
-// Dashboard tổng (giữ nguyên)
+// Dashboard đơn giản
 app.get("/", (req, res) => {
-    const html = `
+    res.send(`
     <!DOCTYPE html>
-    <html lang="vi">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>AI VIP BRAIN PANEL v2.0</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            body { background-color: #0b0f19; color: #f1f5f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-            .glow-win { text-shadow: 0 0 12px #22c55e; color: #4ade80; }
-            .glow-lose { text-shadow: 0 0 12px #ef4444; color: #f87171; }
-            .table-container::-webkit-scrollbar { width: 5px; }
-            .table-container::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 99px; }
-        </style>
-    </head>
-    <body class="p-4 md:p-8">
-        <div class="max-w-7xl mx-auto">
-            <div class="flex flex-col md:flex-row justify-between items-center border-b border-slate-800 pb-6 mb-8 gap-4">
-                <div>
-                    <h1 class="text-3xl font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600">AI DETECTOR TRADING BOT VIP</h1>
-                    <p class="text-xs text-slate-400 mt-1">Hybrid AI: Markov bậc cao + Phân tích cầu + Bẻ cầu + Xu hướng Bayes</p>
-                </div>
-                <div class="flex items-center gap-3 bg-slate-900 border border-slate-800 px-4 py-2 rounded-full">
-                    <span class="relative flex h-3 w-3">
-                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                    </span>
-                    <span id="live-clock" class="text-xs font-mono text-slate-300">Đang đồng bộ live...</span>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                    <div class="flex justify-between items-center mb-4">
-                        <h2 class="text-xl font-bold text-cyan-400">⚡ TRUYỀN THỐNG</h2>
-                        <div id="summary-normal" class="flex gap-2 text-xs"></div>
-                    </div>
-                    <div class="table-container max-h-[520px] overflow-y-auto rounded-xl border border-slate-800">
-                        <table class="w-full text-center border-collapse">
-                            <thead class="bg-slate-950 text-slate-400 text-xs sticky top-0 uppercase">
-                                <tr><th class="py-3 px-2">Phiên</th><th class="py-3 px-2">Pattern</th><th class="py-3 px-2">AI Báo</th><th class="py-3 px-2">Kết Quả</th><th class="py-3 px-2">Đánh Giá</th></tr>
-                            </thead>
-                            <tbody id="body-normal" class="divide-y divide-slate-800/60 text-sm font-medium"></tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
-                    <div class="flex justify-between items-center mb-4">
-                        <h2 class="text-xl font-bold text-purple-400">🔒 MD5 VIP</h2>
-                        <div id="summary-md5" class="flex gap-2 text-xs"></div>
-                    </div>
-                    <div class="table-container max-h-[520px] overflow-y-auto rounded-xl border border-slate-800">
-                        <table class="w-full text-center border-collapse">
-                            <thead class="bg-slate-950 text-slate-400 text-xs sticky top-0 uppercase">
-                                <tr><th class="py-3 px-2">Phiên</th><th class="py-3 px-2">Pattern</th><th class="py-3 px-2">AI Báo</th><th class="py-3 px-2">Kết Quả</th><th class="py-3 px-2">Đánh Giá</th></tr>
-                            </thead>
-                            <tbody id="body-md5" class="divide-y divide-slate-800/60 text-sm font-medium"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <script>
-            function buildRowHtml(item) {
-                let statusBadge = "";
-                if(item.danh_gia === "THẮNG") {
-                    statusBadge = '<span class="bg-emerald-950/80 text-emerald-400 px-2.5 py-1 rounded-md text-xs font-bold border border-emerald-900/50 glow-win">THẮNG</span>';
-                } else if(item.danh_gia === "THUA") {
-                    statusBadge = '<span class="bg-rose-950/80 text-rose-400 px-2.5 py-1 rounded-md text-xs font-bold border border-rose-900/50 glow-lose">THUA</span>';
-                } else {
-                    statusBadge = '<span class="bg-amber-950/80 text-amber-400 px-2.5 py-1 rounded-md text-xs font-medium border border-amber-900/50 animate-pulse">ĐANG CHỜ</span>';
-                }
-                const aiColor = item.du_doan === "TÀI" ? "text-red-400" : "text-sky-400";
-                return \`<tr class="hover:bg-slate-800/40 transition-colors">
-                    <td class="py-3 px-2 font-mono text-slate-400 text-xs">#\${item.phien}</td>
-                    <td class="py-3 px-2 text-xs text-slate-400">\${item.chi_tiet || "Đang quét"}</td>
-                    <td class="py-3 px-2 font-bold \${aiColor}">\${item.du_doan}</td>
-                    <td class="py-3 px-2 text-slate-300 font-semibold">\${item.ket_qua || "..."}</td>
-                    <td class="py-3 px-2">\${statusBadge}</td>
-                </tr>\`;
-            }
-            async function refreshUI() {
-                try {
-                    document.getElementById('live-clock').innerText = "Live: " + new Date().toLocaleTimeString();
-                    const [resNormal, resMd5] = await Promise.all([
-                        fetch('/thongke').then(r => r.json()),
-                        fetch('/thongkemd5').then(r => r.json())
-                    ]);
-                    document.getElementById('summary-normal').innerHTML = \`<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">Mẫu: \${resNormal.tong_du_doan}</span><span class="bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded">Thắng: \${resNormal.tong_thang}</span><span class="bg-blue-900/40 text-cyan-400 px-2 py-1 rounded font-bold">\${resNormal.ti_le_chinh_xac}</span>\`;
-                    document.getElementById('body-normal').innerHTML = resNormal.lich_su.map(buildRowHtml).join('') || '<tr><td colspan="5" class="py-4 text-slate-500">Đang tải...</td></tr>';
-                    document.getElementById('summary-md5').innerHTML = \`<span class="bg-slate-800 text-slate-300 px-2 py-1 rounded">Mẫu: \${resMd5.tong_du_doan}</span><span class="bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded">Thắng: \${resMd5.tong_thang}</span><span class="bg-purple-900/40 text-purple-400 px-2 py-1 rounded font-bold">\${resMd5.ti_le_chinh_xac}</span>\`;
-                    document.getElementById('body-md5').innerHTML = resMd5.lich_su.map(buildRowHtml).join('') || '<tr><td colspan="5" class="py-4 text-slate-500">Đang tải...</td></tr>';
-                } catch(e) { console.log(e); }
-            }
-            setInterval(refreshUI, 3000);
-            refreshUI();
-        </script>
-    </body>
-    </html>`;
-    res.send(html);
+    <html>
+    <head><meta charset="UTF-8"><meta http-equiv="refresh" content="5"><title>MEGA VIP BRAIN ULTRA v4.0</title><script src="https://cdn.tailwindcss.com"></script></head>
+    <body class="bg-gray-950 text-white p-6"><div class="max-w-6xl mx-auto">
+    <h1 class="text-3xl font-bold text-cyan-400">🧠 LC79 ULTRA v4.0 - Tự học siêu cấp</h1>
+    <div class="grid grid-cols-2 gap-6 mt-6">
+    <div class="bg-slate-900 p-4 rounded-2xl"><h2 class="text-xl text-cyan-400">📊 Truyền thống</h2><div id="stats1"></div><div id="table1"></div></div>
+    <div class="bg-slate-900 p-4 rounded-2xl"><h2 class="text-xl text-purple-400">🔐 MD5</h2><div id="stats2"></div><div id="table2"></div></div>
+    </div></div>
+    <script>
+    async function load(){ 
+        let a=await fetch('/thongke').then(r=>r.json()); 
+        let b=await fetch('/thongkemd5').then(r=>r.json());
+        document.getElementById('stats1').innerHTML=\`Tỉ lệ: \${a.ti_le_chinh_xac} | Thắng: \${a.tong_thang} / \${a.tong_du_doan}\`;
+        document.getElementById('stats2').innerHTML=\`Tỉ lệ: \${b.ti_le_chinh_xac} | Thắng: \${b.tong_thang} / \${b.tong_du_doan}\`;
+        document.getElementById('table1').innerHTML='<table class="w-full text-sm">'+a.lich_su.map(i=>'<tr><td>#'+i.phien+'</td><td>'+i.du_doan+'</td><td>'+i.ket_qua+'</td><td class="'+(i.danh_gia==='THẮNG'?'text-green-400':'text-red-400')+'">'+i.danh_gia+'</td></tr>').join('')+'</table>';
+        document.getElementById('table2').innerHTML='<table class="w-full text-sm">'+b.lich_su.map(i=>'<tr><td>#'+i.phien+'</td><td>'+i.du_doan+'</td><td>'+i.ket_qua+'</td><td class="'+(i.danh_gia==='THẮNG'?'text-green-400':'text-red-400')+'">'+i.danh_gia+'</td></tr>').join('')+'</table>';
+    }
+    setInterval(load,3000); load();
+    </script>
+    </body></html>
+    `);
 });
 
 app.listen(PORT, () => {
-    console.log("======================================================");
-    console.log(`🚀 VIP AI BRAIN ENGINE ĐÃ SẴN SÀNG TẠI CỔNG ${PORT}`);
+    console.log(`⚡ MEGA VIP BRAIN ULTRA v4.0 running on port ${PORT}`);
     console.log(`🌐 Dashboard: http://localhost:${PORT}`);
-    console.log(`🎯 Dự đoán TX: http://localhost:${PORT}/dudoan/tx`);
-    console.log(`🔐 Dự đoán MD5: http://localhost:${PORT}/dudoan/txmd5`);
-    console.log("======================================================");
 });
